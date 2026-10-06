@@ -1,0 +1,75 @@
+# IAM Agent — containerised deployment.
+#
+#   docker compose up                       # REST control plane on :8000
+#   docker compose run --rm cli preflight   # any CLI command
+#   docker compose run --rm mcp             # MCP server on stdio
+#
+# Configuration comes from .env (copy .env.example). Nothing here enables writes:
+# IAM_GLOBAL_DRY_RUN stays true unless you set it, which is deliberate — a compose
+# file that quietly turned on production mutations would be the worst possible
+# place to discover that.
+
+services:
+  api:
+    build: .
+    image: iam-agent:latest
+    restart: unless-stopped
+    ports:
+      - "${IAM_API_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      # Belt and braces: the file above may leave these unset, and the safe
+      # default must not depend on remembering to set it.
+      IAM_GLOBAL_DRY_RUN: ${IAM_GLOBAL_DRY_RUN:-true}
+      IAM_APPROVAL__DEFAULT_MODE: ${IAM_APPROVAL__DEFAULT_MODE:-approval_required}
+      IAM_AD__ALLOW_HARD_DELETE: ${IAM_AD__ALLOW_HARD_DELETE:-false}
+    volumes:
+      # Audit log, approval queue, runs, persisted simulated estate. Losing the
+      # approval queue would strand every parked run.
+      - iam-data:/app/data
+      # Operator-maintained agent prompt and any local overrides.
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Same image, no port: the MCP server speaks stdio, so it is meant to be run
+  # interactively (`docker compose run --rm mcp`) and wired into Claude Desktop.
+  mcp:
+    image: iam-agent:latest
+    depends_on:
+      - api
+    env_file:
+      - .env
+    environment:
+      IAM_GLOBAL_DRY_RUN: ${IAM_GLOBAL_DRY_RUN:-true}
+      IAM_APPROVAL__DEFAULT_MODE: ${IAM_APPROVAL__DEFAULT_MODE:-approval_required}
+    volumes:
+      - iam-data:/app/data
+      - ./config:/app/config:ro
+    stdin_open: true
+    entrypoint: ["iam-agent"]
+    command: ["mcp"]
+    profiles: ["mcp"]
+
+  # One-shot CLI, sharing the same state volume so `approvals decide` here
+  # unblocks a run the API parked.
+  cli:
+    image: iam-agent:latest
+    env_file:
+      - .env
+    environment:
+      IAM_GLOBAL_DRY_RUN: ${IAM_GLOBAL_DRY_RUN:-true}
+    volumes:
+      - iam-data:/app/data
+      - ./config:/app/config:ro
+    entrypoint: ["iam-agent"]
+    command: ["status"]
+    profiles: ["cli"]
+
+volumes:
+  iam-data:
