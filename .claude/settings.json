@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "mcp__iam-agent__iam_status",
+      "mcp__iam-agent__iam_preflight",
+      "mcp__iam-agent__list_workflows",
+      "mcp__iam-agent__find_people",
+      "mcp__iam-agent__get_identity",
+      "mcp__iam-agent__get_user_access",
+      "mcp__iam-agent__audit_estate",
+      "mcp__iam-agent__list_drift_for_user",
+      "mcp__iam-agent__list_devices",
+      "mcp__iam-agent__get_device",
+      "mcp__iam-agent__list_device_profiles",
+      "mcp__iam-agent__list_groups",
+      "mcp__iam-agent__list_licences",
+      "mcp__iam-agent__plan_workflow",
+      "mcp__iam-agent__list_pending_approvals",
+      "mcp__iam-agent__show_approval",
+      "mcp__iam-agent__list_runs",
+      "mcp__iam-agent__get_run",
+      "mcp__iam-agent__read_audit_log"
+    ],
+    "ask": [
+      "mcp__iam-agent__onboard_employee",
+      "mcp__iam-agent__offboard_employee",
+      "mcp__iam-agent__transfer_employee",
+      "mcp__iam-agent__disable_user",
+      "mcp__iam-agent__revoke_sessions",
+      "mcp__iam-agent__lock_device",
+      "mcp__iam-agent__wipe_device",
+      "mcp__iam-agent__grant_access",
+      "mcp__iam-agent__revoke_access",
+      "mcp__iam-agent__issue_temporary_access_pass",
+      "mcp__iam-agent__run_endpoint_automation",
+      "mcp__iam-agent__cancel_run",
+      "mcp__iam-agent__rollback_run"
+    ],
+    "deny": [
+      "mcp__iam-agent__decide_approval"
+    ]
+  },
+  "env": {
+    "IAM_GLOBAL_DRY_RUN": "false",
+    "IAM_APPROVAL__DEFAULT_MODE": "approval_required",
+    "IAM_APPROVAL__AUTONOMOUS_MAX_RISK": "low"
+  }
+}

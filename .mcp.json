@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "iam-agent": {
+      "command": "iam-agent",
+      "args": ["mcp"],
+      "env": {
+        "IAM_MCP_TRANSPORT": "stdio",
+        "IAM_GLOBAL_DRY_RUN": "false",
+        "IAM_APPROVAL__DEFAULT_MODE": "approval_required",
+        "IAM_APPROVAL__AUTONOMOUS_MAX_RISK": "low"
+      }
+    }
+  }
+}

@@ -105,12 +105,28 @@ class Orchestrator:
                 "Action1 is pointed at the North America region while the tenant appears to be EU."
             )
 
+        # An IAM_* variable that matches no setting means a config line did
+        # nothing at all - almost always a typo. Reported as a problem rather
+        # than a note, because preflight is precisely the moment to find out,
+        # and the silent failure mode is asymmetric: the defaults are the safe
+        # ones, so a mistyped `IAM_ENTRA__ENABLED=true` leaves the agent talking
+        # to the simulator while the operator believes it is live.
+        unrecognized = self.settings.unrecognized_env_vars()
+        for name in unrecognized:
+            problems.append(
+                f"{name} is set but matches no setting - it is being ignored. "
+                "Check the spelling against .env.example."
+            )
+
         return {
             "ok": not problems,
             "mode": self.settings.effective_mode(),
             "connectors": {n: s.to_dict() for n, s in statuses.items()},
             "problems": problems,
             "configuration_notes": configuration_notes,
+            "unrecognized_env": unrecognized,
+            "live_platforms": self.settings.platform_backends_live(),
+            "simulated_platforms": self.settings.platform_backends_mock(),
         }
 
     # ------------------------------------------------------------------ #

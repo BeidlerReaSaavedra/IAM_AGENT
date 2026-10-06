@@ -10,7 +10,11 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+import os
+from typing import Annotated, Mapping
+
+from pydantic import BeforeValidator, Field, field_validator
+from pydantic_settings import NoDecode
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # --------------------------------------------------------------------------- #
@@ -38,6 +42,32 @@ RISK_ORDER: dict[str, int] = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 # --------------------------------------------------------------------------- #
 
 
+def split_csv(value: object) -> object:
+    """Coerce an environment variable into a list of strings.
+
+    Env vars are strings, so a list setting arrives as ``"a,b,c"`` - or, very
+    commonly, as ``""`` when the line is present in a copied `.env.example` but
+    left unfilled. Without this, an empty value raises a validation error at
+    startup, which is a bad failure mode for a config file that ships with empty
+    placeholders.
+    """
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    return value
+
+
+#: List setting that tolerates comma-separated and empty environment values.
+#:
+#: ``NoDecode`` is load-bearing: pydantic-settings treats a nested list field as
+#: "complex" and runs ``json.loads`` on the raw environment value *before* any
+#: validator sees it, so ``IAM_M365__DEFAULT_LICENSE_SKUS=ENTERPRISEPACK,EMS``
+#: raised a SettingsError at import time. Disabling the decode lets ``split_csv``
+#: handle it, which is what an operator writing a .env actually expects.
+#:
+#: Use this for every ``list[str]`` in this module so a new field cannot forget it.
+StringList = Annotated[list[str], NoDecode, BeforeValidator(split_csv)]
+
+
 class EntraSettings(BaseSettings):
     """Azure Entra ID (Microsoft Graph) - identity plane."""
 
@@ -59,7 +89,7 @@ class EntraSettings(BaseSettings):
     authority: str = ""
 
     # Scopes requested via client-credentials flow (application permissions).
-    scopes: list[str] = Field(default_factory=lambda: ["https://graph.microsoft.com/.default"])
+    scopes: StringList = Field(default_factory=lambda: ["https://graph.microsoft.com/.default"])
 
     # Optional: pin the domain used to build userPrincipalNames.
     primary_domain: str = ""
@@ -109,7 +139,7 @@ class M365Settings(BaseSettings):
     shared_mailbox_retention_days: int = 90
 
     # Default licence SKUs applied on onboarding (SKU part numbers, e.g. "ENTERPRISEPACK").
-    default_license_skus: list[str] = Field(default_factory=list)
+    default_license_skus: StringList = Field(default_factory=list)
 
     @property
     def graph_url(self) -> str:
@@ -124,7 +154,7 @@ class ActiveDirectorySettings(BaseSettings):
     enabled: bool = False
     backend: Backend = "mock"
 
-    servers: list[str] = Field(default_factory=list)
+    servers: StringList = Field(default_factory=list)
     """Domain controllers, e.g. ``["dc01.corp.local", "dc02.corp.local"]``."""
     port: int = 636
     use_ssl: bool = True
@@ -154,13 +184,6 @@ class ActiveDirectorySettings(BaseSettings):
 
     # Safety: never delete an AD object by default, disable + move instead.
     allow_hard_delete: bool = False
-
-    @field_validator("servers", mode="before")
-    @classmethod
-    def _split(cls, v: object) -> object:
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v
 
 
 class Action1Settings(BaseSettings):
@@ -283,7 +306,7 @@ class AuditSettings(BaseSettings):
     log_path: str = "data/audit.jsonl"
     run_store_path: str = "data/runs"
     include_request_payloads: bool = True
-    redact_fields: list[str] = Field(
+    redact_fields: StringList = Field(
         default_factory=lambda: [
             "password",
             "client_secret",
@@ -320,20 +343,13 @@ class APISettings(BaseSettings):
 
     host: str = "0.0.0.0"
     port: int = 8000
-    cors_origins: list[str] = Field(default_factory=lambda: ["*"])
+    cors_origins: StringList = Field(default_factory=lambda: ["*"])
     api_token: str = ""
     """Shared bearer token protecting the control-plane API. Empty disables auth."""
 
     # Webhook signing secrets for inbound triggers.
     scalefusion_webhook_secret: str = ""
     hr_webhook_secret: str = ""
-
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def _split(cls, v: object) -> object:
-        if isinstance(v, str):
-            return [s.strip() for s in v.split(",") if s.strip()]
-        return v
 
 
 # --------------------------------------------------------------------------- #
@@ -354,7 +370,20 @@ class Settings(BaseSettings):
 
     entra: EntraSettings = Field(default_factory=EntraSettings)
     m365: M365Settings = Field(default_factory=M365Settings)
-    active_directory: ActiveDirectorySettings = Field(default_factory=ActiveDirectorySettings)
+    # Named `ad`, not `active_directory`, and that naming is load-bearing.
+    #
+    # Nested env vars resolve by ROOT FIELD NAME, not by the sub-model's
+    # env_prefix. For every other section the two coincide, so both
+    # `IAM_ENTRA__ENABLED` and `IAM_ENTRA_ENABLED` work. With the field called
+    # `active_directory` and the prefix `IAM_AD_`, they did not: `IAM_AD__BASE_DN`
+    # - the form everybody writes by analogy - silently did nothing, and
+    # `validation_alias` does not help, because pydantic-settings matches nested
+    # env vars before aliases are consulted.
+    #
+    # A silently ignored setting is dangerous here in one specific direction:
+    # `IAM_ENTRA__ENABLED=true` not applying means the agent talks to the
+    # simulator while the operator believes it is talking to their tenant.
+    ad: ActiveDirectorySettings = Field(default_factory=ActiveDirectorySettings)
     action1: Action1Settings = Field(default_factory=Action1Settings)
     scalefusion: ScalefusionSettings = Field(default_factory=ScalefusionSettings)
 
@@ -374,6 +403,51 @@ class Settings(BaseSettings):
             "action1": self.action1.backend if self.action1.enabled else "mock",
             "scalefusion": self.scalefusion.backend if self.scalefusion.enabled else "mock",
         }
+
+    @property
+    def active_directory(self) -> ActiveDirectorySettings:
+        """Alias for :attr:`ad`.
+
+        Kept because `settings.active_directory` reads better at call sites and
+        was the original name. The *field* is `ad` so that `IAM_AD__<FIELD>`
+        resolves - see the comment on the field.
+        """
+        return self.ad
+
+    def unrecognized_env_vars(self, environ: Mapping[str, str] | None = None) -> list[str]:
+        """Environment variables that look like ours but configure nothing.
+
+        A typo in a setting name does not fail loudly - it is simply ignored, and
+        the field keeps its default. For most software that is an annoyance; for
+        an identity agent it is a safety problem, because the defaults are the
+        *safe* ones (dry run, mock backend, no hard deletes). An operator who
+        believes they enabled a live connector and actually did not will read
+        simulator output as production truth.
+
+        So we enumerate the names we would have accepted and report anything that
+        starts with ``IAM_`` and is not among them.
+        """
+        env = os.environ if environ is None else environ
+        recognised: set[str] = set()
+
+        for root_name, root_field in type(self).model_fields.items():
+            recognised.add(f"IAM_{root_name.upper()}")
+            sub_model = root_field.annotation
+            sub_fields = getattr(sub_model, "model_fields", None)
+            if not sub_fields:
+                continue
+            prefix = str(getattr(sub_model, "model_config", {}).get("env_prefix", "")).upper()
+            for sub_name in sub_fields:
+                # Root-field form: IAM_<ROOT>__<FIELD>
+                recognised.add(f"IAM_{root_name.upper()}__{sub_name.upper()}")
+                # Sub-model prefix form: IAM_ENTRA_<FIELD>
+                if prefix:
+                    recognised.add(f"{prefix}{sub_name.upper()}")
+
+        return sorted(
+            key for key in env
+            if key.upper().startswith("IAM_") and key.upper() not in recognised
+        )
 
     def platform_backends_live(self) -> list[str]:
         """Platforms that will be talked to for real.
