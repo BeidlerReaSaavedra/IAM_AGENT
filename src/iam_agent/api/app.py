@@ -138,12 +138,33 @@ def _signature_matches(secret: str, raw: bytes, provided: str | None) -> bool:
 
     Single implementation on purpose: two copies of HMAC verification drift, and
     drift here fails silently in whichever direction the mismatched one allows.
+
+    An unconfigured secret returns True here, so callers must check for it
+    separately and refuse - see `_require_webhook_secret`. Skipping verification
+    when there is nothing to verify against is how a default deployment ends up
+    with an open endpoint that starts offboardings.
     """
     if not secret:
         return True
     expected = hmac.new(secret.encode(), raw or b"", "sha256").hexdigest()
     candidate = (provided or "").strip().removeprefix("sha256=").strip().lower()
     return hmac.compare_digest(expected, candidate)
+
+
+def _require_webhook_secret(secret: str, setting: str) -> None:
+    """Refuse a webhook whose signing secret was never configured.
+
+    Fail closed. An unauthenticated leaver event is a denial-of-service vector
+    against your own staff, and both secrets default to empty - so without this
+    the out-of-the-box API would accept workflow triggers from anyone who can
+    reach the port.
+    """
+    if not secret:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{setting} is not set, so this webhook refuses all requests. "
+            "Configure it, or leave the endpoint unreachable.",
+        )
 
 
 def _settings_of(request: Request) -> Settings:
@@ -161,10 +182,25 @@ async def require_token(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> str:
-    """Enforce the shared bearer token when one is configured."""
+    """Enforce the shared bearer token on routes that can authorise a write.
+
+    Fails **closed**: with no token configured this used to return "anonymous"
+    and let the request through, which meant a default deployment had an
+    unauthenticated endpoint that could approve device wipes and account
+    deletions. The token defaults to empty, so "not configured" is the out-of-the
+    box state, not an edge case.
+
+    Local development does not need it - `iam-agent approvals decide` runs as the
+    invoking user and enforces the approver identity itself. What needs it is
+    anything reachable over a network.
+    """
     expected = _settings_of(request).api.api_token
     if not expected:
-        return "anonymous"
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "IAM_API__API_TOKEN is not set, so this endpoint refuses all requests. "
+            "Set it, or decide approvals with `iam-agent approvals decide` locally.",
+        )
     if not authorization:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "missing Authorization header")
     scheme, _, token = authorization.partition(" ")
@@ -205,7 +241,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cfg.api.cors_origins,
-        allow_credentials=True,
+        # Never credentials with a wildcard origin. Browsers reject the
+        # combination, but the configuration is still wrong and becomes
+        # exploitable the moment someone narrows `allow_methods` or proxies it.
+        # `cors_origins` defaults to ["*"], so this is the default path.
+        allow_credentials="*" not in cfg.api.cors_origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -586,6 +626,7 @@ def _register_routes(app: FastAPI) -> None:
         """
         settings = _settings_of(request)
         secret = settings.api.hr_webhook_secret
+        _require_webhook_secret(secret, "IAM_API__HR_WEBHOOK_SECRET")
         raw = await request.body()
         if not _signature_matches(secret, raw, x_hub_signature):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
@@ -630,8 +671,9 @@ def _register_routes(app: FastAPI) -> None:
         """
         settings = _settings_of(request)
         secret = settings.api.scalefusion_webhook_secret
+        _require_webhook_secret(secret, "IAM_API__SCALEFUSION_WEBHOOK_SECRET")
         raw = await request.body()
-        if secret and not _signature_matches(secret, raw, x_scalefusion_signature):
+        if not _signature_matches(secret, raw, x_scalefusion_signature):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
 
         try:

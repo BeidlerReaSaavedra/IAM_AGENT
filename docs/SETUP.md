@@ -286,10 +286,11 @@ Lost/Found, User Signed In/Out, Shutdown, Reboot, Custom Properties Updated and
 SIM Swap.
 
 The endpoint verifies an HMAC-SHA256 signature over the **raw body** before
-parsing it. The vendor's exact wire format is not documented, so both a bare hex
-digest and a `sha256=`-prefixed one are accepted — a verifier matching only one
-spelling would reject every legitimate event, and that failure is
-indistinguishable from turning away an attacker.
+parsing it, and refuses with `503` if no secret is configured. The vendor's exact
+wire format is not documented, so both a bare hex digest and a `sha256=`-prefixed
+one are accepted — a verifier matching only one spelling would reject every
+legitimate event, and that failure is indistinguishable from turning away an
+attacker.
 
 ---
 
@@ -303,12 +304,23 @@ IAM_API__HR_WEBHOOK_SECRET=…
 IAM_API__CORS_ORIGINS=https://intranet.corp.local
 ```
 
-**`API_TOKEN` is required.** It guards `POST /approvals/{id}/decision` — the only
-route that can authorise a write. Reads are unguarded by design (they are reads),
-and inbound webhooks use their own HMAC secrets rather than the bearer token.
+**`API_TOKEN` is required, and the endpoint fails closed without it.** It guards
+`POST /approvals/{id}/decision` — the only route that can authorise a write. If it
+is unset that route returns `403` naming this setting, rather than accepting the
+request as `anonymous`. Reads are unguarded by design (they cannot authorise
+anything), and inbound webhooks use their own HMAC secrets.
+
+The same applies to both webhook secrets: unset means `503`, not "verification
+skipped". All three default to empty, so a freshly started API refuses writes
+until you configure it — that is deliberate. Use `iam-agent approvals decide`
+locally while developing; it runs as the invoking user and enforces the approver
+identity itself.
 
 `CORS_ORIGINS` defaults to `["*"]`. **Set it explicitly in production.** The
-default is convenient for development and wrong everywhere else. Note that a
+default is convenient for development and wrong everywhere else. With a wildcard
+the app also sets `allow_credentials=False` — credentials plus a wildcard origin
+is a combination that becomes exploitable the moment anything else is narrowed, so
+it is not offered even by accident. Note that a
 *blank* value means an empty list, not the default — list settings replace rather
 than extend, which is also why `.env.example` ships `IAM_AUDIT__REDACT_FIELDS`
 commented out.
@@ -430,6 +442,8 @@ it complete with `iam-agent runs show <run-id>`.
 | Run stuck at `running` forever | Fixed — a failed step used to be counted as incomplete. Update if you see it. |
 | Approvals queue empty but a run is parked | Was a `NameError` swallowed by a bare `except`. Update if you see it. |
 | CLI `ValidationError: first_name / last_name` | Fixed. `onboard "Full Name"` and `offboard username` both work now. |
+| `403 IAM_API__API_TOKEN is not set` | Correct behaviour. Set the token, or decide approvals via the CLI. |
+| `503 …_WEBHOOK_SECRET is not set` | Correct behaviour. Configure the secret before exposing the endpoint. |
 
 State lives in `data/`: `audit.jsonl`, `approvals.jsonl`, `runs/*.json`,
 `mock_estate.json`. Delete the directory to start clean — `make reset` does it and

@@ -156,8 +156,14 @@ curl -s localhost:8000/preflight | jq
 32 routes: identity lookups, drift, devices, runs, approvals, audit, and two
 inbound webhooks (`/webhooks/hr` for joiner/mover/leaver events,
 `/webhooks/scalefusion` for device lifecycle). Both verify an HMAC-SHA256
-signature over the raw body **before** parsing it. Approval decisions require a
-bearer token; reads do not.
+signature over the raw body **before** parsing it.
+
+These three fail **closed**: with no token or signing secret configured, approval
+decisions return `403` and both webhooks return `503`, each naming the exact
+setting to fix. All three default to empty, so "not configured" is the
+out-of-the-box state — an earlier version treated it as "nothing to verify" and
+left a default deployment with an unauthenticated endpoint that could start
+offboardings. Reads stay open; they cannot authorise anything.
 
 ### MCP server
 

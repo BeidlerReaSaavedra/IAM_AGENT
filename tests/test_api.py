@@ -81,7 +81,11 @@ def test_signature_rejects_empty_and_garbage() -> None:
 
 
 def test_absent_secret_disables_verification() -> None:
-    """With no secret configured there is nothing to compare against."""
+    """With no secret there is nothing to compare against - callers must refuse.
+
+    `_signature_matches` cannot distinguish "no secret configured" from "valid",
+    so the endpoints check separately via `_require_webhook_secret`. Tested below.
+    """
     assert _signature_matches("", b"body", None) is True
 
 
@@ -296,3 +300,76 @@ def test_cli_manager_becomes_a_manager_object() -> None:
     employee = _employee(identifier="Aina Serra", manager_email="lferra@contoso-balears.example")
     assert employee.manager is not None
     assert employee.manager.email == "lferra@contoso-balears.example"
+
+
+# --------------------------------------------------------------------------- #
+# Fail closed by default
+# --------------------------------------------------------------------------- #
+#
+# api_token, hr_webhook_secret and scalefusion_webhook_secret all default to
+# empty, so "not configured" is the out-of-the-box state rather than an edge
+# case. An earlier version treated it as "nothing to check" and let requests
+# through, which meant a default deployment had an unauthenticated endpoint that
+# could approve device wipes, and two that could start offboardings.
+
+
+def _open_client() -> TestClient:
+    """An API with every secret and token left at its default (empty)."""
+    get_mock_store(reseed=True)
+    return TestClient(create_app(Settings()))
+
+
+def test_webhooks_refuse_when_no_secret_is_configured() -> None:
+    client = _open_client()
+    for path in ("/webhooks/hr", "/webhooks/scalefusion"):
+        response = client.post(
+            path, content=b'{"event_type":"leaver"}', headers={"Content-Type": "application/json"}
+        )
+        assert response.status_code == 503, f"{path} must fail closed, got {response.status_code}"
+        assert "is not set" in response.text
+
+
+def test_the_webhook_error_names_the_setting_to_fix() -> None:
+    """A refusal that does not say what to configure just becomes a support ticket."""
+    client = _open_client()
+    response = client.post("/webhooks/hr", content=b"{}", headers={"Content-Type": "application/json"})
+    assert "IAM_API__HR_WEBHOOK_SECRET" in response.text
+
+    response = client.post(
+        "/webhooks/scalefusion", content=b"{}", headers={"Content-Type": "application/json"}
+    )
+    assert "IAM_API__SCALEFUSION_WEBHOOK_SECRET" in response.text
+
+
+def test_decisions_refuse_when_no_token_is_configured() -> None:
+    client = _open_client()
+    response = client.post(
+        "/approvals/does-not-exist/decision",
+        json={"approve": True, "decided_by": "someone@corp.example"},
+    )
+    assert response.status_code == 403, response.text
+    assert "IAM_API__API_TOKEN" in response.text
+
+
+def test_reads_still_work_on_an_unconfigured_api() -> None:
+    """Failing closed applies to routes that authorise writes, not to reads."""
+    client = _open_client()
+    assert client.get("/health").status_code == 200
+    assert client.get("/preflight").status_code == 200
+    assert client.get("/approvals").status_code == 200
+    assert client.get("/devices").status_code == 200
+
+
+def test_wildcard_cors_does_not_allow_credentials() -> None:
+    """`cors_origins` defaults to ["*"]; credentials must not be allowed with it."""
+    client = _open_client()
+    response = client.get("/health", headers={"Origin": "https://evil.example"})
+    assert response.headers.get("access-control-allow-credentials") != "true"
+
+
+def test_narrow_cors_may_allow_credentials() -> None:
+    get_mock_store(reseed=True)
+    settings = Settings(api={"cors_origins": ["https://intranet.corp.local"]})
+    client = TestClient(create_app(settings))
+    response = client.get("/health", headers={"Origin": "https://intranet.corp.local"})
+    assert response.headers.get("access-control-allow-origin") == "https://intranet.corp.local"
