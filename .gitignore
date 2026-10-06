@@ -1,0 +1,70 @@
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# --- Virtual environments -------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Tooling caches -------------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- Runtime state --------------------------------------------------------
+# This directory holds the audit log, the approval queue and persisted runs.
+# It is operational data for a *specific deployment*: never commit it, and never
+# ship it in an image. Note that a plaintext initial password used to be able to
+# reach these files - see tests/test_secret_redaction.py - so treat anything
+# under data/ as sensitive regardless.
+data/
+*.jsonl
+runs/
+
+# --- Credentials ----------------------------------------------------------
+# Live mode needs real secrets (client secrets, LDAP bind passwords, API keys).
+# .env is the documented place for them and must never be committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.p12
+*.key
+credentials.json
+secrets.yaml
+secrets.yml
+
+# --- Editors / OS ---------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Arena sandbox --------------------------------------------------------
+.arena/
+.cache/
+.local/
+Unselected files/
+
+# --- Logs -----------------------------------------------------------------
+*.log
+logs/
