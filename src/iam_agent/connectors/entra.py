@@ -12,7 +12,7 @@ for the scopes listed in ``docs/PERMISSIONS.md``.
 from __future__ import annotations
 
 import abc
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import msal
@@ -87,13 +87,33 @@ def _parse_dt(value: Any) -> datetime | None:
         return None
 
 
+def _licence_key(entry: Any) -> str:
+    """Best identifier for one assignedLicenses entry: part number, else skuId."""
+    if isinstance(entry, dict):
+        return str(entry.get("skuPartNumber") or entry.get("skuId") or "")
+    return str(entry or "")
+
+
 def _map_user(raw: dict[str, Any]) -> DirectoryUser:
     """Translate a Graph user resource into the normalised model."""
-    licenses = []
+    # Graph identifies a licence by skuId (a GUID); the rest of this system - and
+    # the workflows that diff entitlements - works in skuPartNumbers. Prefer the
+    # part number when the payload carries one, and deduplicate: the simulator
+    # exposes the same licence under both keys, and double-counting made a mover
+    # look like they held two copies of one SKU, which in turn produced a wrong
+    # licence delta.
+    licenses: list[str] = []
+    seen_licenses: set[str] = set()
     for assigned in raw.get("assignedLicenses") or []:
-        licenses.append(str(assigned.get("skuId", "")))
-    # Graph returns skuId GUIDs; the mock uses part numbers - keep both usable.
-    licenses += [str(s) for s in raw.get("licensePartNumbers") or []]
+        value = _licence_key(assigned)
+        if value and value not in seen_licenses:
+            seen_licenses.add(value)
+            licenses.append(value)
+    for part in raw.get("licensePartNumbers") or []:
+        value = str(part)
+        if value and value not in seen_licenses:
+            seen_licenses.add(value)
+            licenses.append(value)
 
     sign_in = raw.get("signInActivity") or {}
     return DirectoryUser(
@@ -223,7 +243,7 @@ def employee_to_graph_payload(
         "employeeId": employee.employee_id or employee.worker_id,
         "employeeType": employee.employment_type.value,
         "employeeHireDate": (
-            datetime.combine(employee.hire_date, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+            datetime.combine(employee.hire_date, datetime.min.time(), tzinfo=UTC).isoformat()
             if employee.hire_date
             else None
         ),
@@ -306,7 +326,12 @@ class EntraConnector(BaseConnector, abc.ABC):
     @abc.abstractmethod
     async def remove_all_group_memberships(self, user_id: str) -> dict[str, Any]: ...
     @abc.abstractmethod
-    async def assign_license(self, user_id: str, sku_part_numbers: list[str]) -> dict[str, Any]: ...
+    async def assign_license(
+        self,
+        user_id: str,
+        sku_part_numbers: list[str],
+        remove_sku_part_numbers: list[str] | None = None,
+    ) -> dict[str, Any]: ...
     @abc.abstractmethod
     async def remove_all_licenses(self, user_id: str) -> dict[str, Any]: ...
     @abc.abstractmethod
@@ -415,7 +440,7 @@ class LiveEntraConnector(EntraConnector):
             return HealthStatus(
                 self.name, True, "live", f"connected to tenant '{name}'", (_time.monotonic() - started) * 1000
             )
-        except Exception as exc:  # noqa: BLE001 - health must never raise
+        except Exception as exc:
             return HealthStatus(
                 self.name, False, "live", f"{type(exc).__name__}: {exc}", (_time.monotonic() - started) * 1000
             )
@@ -463,7 +488,7 @@ class LiveEntraConnector(EntraConnector):
             if len(values) > 1:
                 raise ConflictError(
                     f"'{identifier}' matched {len(values)} users; use the object id", platform=self.name
-                )
+                ) from None
             return values[0]["id"]
 
     # ---- reads ----------------------------------------------------------- #
@@ -582,7 +607,7 @@ class LiveEntraConnector(EntraConnector):
         uid = await self._resolve_user_id(user_id)
         try:
             methods = await self._paged(f"users/{uid}/authentication/methods")
-        except (NotFoundError, Exception):  # noqa: BLE001
+        except (NotFoundError, Exception):
             return {"registered": None, "methods": [], "detail": "methods not readable"}
         kinds = [m.get("@odata.type", "").split(".")[-1] for m in methods]
         strong = [k for k in kinds if k not in ("passwordAuthenticationMethod", "")]
@@ -602,7 +627,7 @@ class LiveEntraConnector(EntraConnector):
             values = payload.get("value") or []
             if values:
                 return str(values[0].get("id", ""))
-        except Exception:  # noqa: BLE001 - Domain.Read.All may not be granted
+        except Exception:
             pass
         # Fall back to whatever the organization object reports.
         try:
@@ -613,7 +638,7 @@ class LiveEntraConnector(EntraConnector):
                     return str(entry.get("name", ""))
             if domains:
                 return str(domains[0].get("name", ""))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return ""
 
@@ -621,7 +646,13 @@ class LiveEntraConnector(EntraConnector):
 
     async def create_user(self, employee: Employee, *, password: str) -> DirectoryUser:
         domain = self.settings.primary_domain or (employee.email.split("@")[-1] if employee.email else "")
-        skus = await self._resolve_skus(employee.license_skus or self.settings.default_license_skus)
+        # Only the licences the employee actually carries. Reaching for a
+        # department default here used to read `self.settings.default_license_skus`,
+        # which lives on M365Settings - on EntraSettings it is an AttributeError.
+        # The mock overrode create_user so it never surfaced, and in live mode the
+        # first onboarding would have failed outright. Licence entitlement is the
+        # M365 plane's decision anyway; the onboarding workflow grants it.
+        skus = await self._resolve_skus(employee.license_skus)
         payload = employee_to_graph_payload(employee, password=password, domain=domain, license_skus=skus)
 
         # Idempotency: if the UPN already exists, return it instead of failing.
@@ -725,25 +756,50 @@ class LiveEntraConnector(EntraConnector):
                 skipped.append({"id": group.external_id, "reason": "already removed"})
         return {"user_id": uid, "removed_from": removed, "skipped": skipped}
 
-    async def assign_license(self, user_id: str, sku_part_numbers: list[str]) -> dict[str, Any]:
+    async def assign_license(
+        self,
+        user_id: str,
+        sku_part_numbers: list[str],
+        remove_sku_part_numbers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Add and/or release licences.
+
+        Graph performs both halves in a single ``assignLicense`` call, so a mover
+        changing tier is never left holding two licences and never left without
+        one. Doing it as two separate actions would need an ordering guarantee
+        the executor does not give within a step, and a failure between them
+        would strand the person with both SKUs billed.
+        """
         uid = await self._resolve_user_id(user_id)
-        skus = await self._resolve_skus(sku_part_numbers)
-        if not skus:
+        add = await self._resolve_skus(sku_part_numbers)
+        drop = await self._resolve_skus(remove_sku_part_numbers or [])
+        drop_ids = [d["skuId"] for d in drop if d.get("skuId")]
+        if not add and not drop_ids:
             return {"user_id": uid, "assigned": [], "warning": "no matching subscribed SKUs"}
-        body = {"addLicenses": skus, "removeLicenses": []}
+        body = {"addLicenses": add, "removeLicenses": drop_ids}
         raw = await self.request("POST", self._g(f"users/{uid}/assignLicense"), json_body=body)
         return {
             "user_id": uid,
-            "assigned": [s["skuId"] for s in skus],
+            "assigned": [a["skuId"] for a in add],
+            "removed": drop_ids,
             "requested": sku_part_numbers,
-            "licenses": [l.get("skuPartNumber") for l in (raw or {}).get("assignedLicenses", [])],
+            "release_requested": remove_sku_part_numbers or [],
+            "licenses": [_licence_key(entry) for entry in (raw or {}).get("assignedLicenses", [])],
         }
 
     async def remove_all_licenses(self, user_id: str) -> dict[str, Any]:
         uid = await self._resolve_user_id(user_id)
         user = await self.get_user(uid)
-        current = user.raw.get("assignedLicenses") or [] if user else []
-        body = {"addLicenses": [], "removeLicenses": [l.get("skuId") for l in current if l.get("skuId")]}
+        # Written as an explicit guard rather than `a or b if c else []`: the
+        # one-liner happens to evaluate the condition first, but it reads as
+        # though `user.raw` is dereferenced unconditionally.
+        current: list[dict[str, Any]] = []
+        if user:
+            current = user.raw.get("assignedLicenses") or []
+        remove_ids = [
+            entry.get("skuId") for entry in current if isinstance(entry, dict) and entry.get("skuId")
+        ]
+        body = {"addLicenses": [], "removeLicenses": remove_ids}
         await self.request("POST", self._g(f"users/{uid}/assignLicense"), json_body=body)
         return {"user_id": uid, "removed": len(body["removeLicenses"])}
 
@@ -772,7 +828,7 @@ class LiveEntraConnector(EntraConnector):
     ) -> dict[str, Any]:
         uid = await self._resolve_user_id(user_id)
         body = {
-            "startDateTime": datetime.now(timezone.utc).isoformat(),
+            "startDateTime": datetime.now(UTC).isoformat(),
             "lifetimeInMinutes": lifetime_minutes,
             "isUsableOnce": one_time,
         }
@@ -797,7 +853,7 @@ class LiveEntraConnector(EntraConnector):
             return []
         try:
             return await self._paged("identityGovernance/lifecycleWorkflows/workflows")
-        except Exception:  # noqa: BLE001 - Governance may not be licensed
+        except Exception:
             return []
 
     async def run_lifecycle_workflow(self, workflow_id: str, user_ids: list[str]) -> dict[str, Any]:
@@ -966,7 +1022,7 @@ class MockEntraConnector(EntraConnector):
             self.store.log_event("entra.create_user.idempotent", upn=existing["user_principal_name"])
             return self._to_model(existing)
 
-        uid = str(uuid4_hex())
+        uid = new_object_id()
         domain = self.settings.primary_domain or (
             employee.email.split("@")[-1] if employee.email else "contoso-balears.example"
         )
@@ -992,7 +1048,7 @@ class MockEntraConnector(EntraConnector):
             "on_premises_sync_enabled": False,
             "on_premises_sam_account_name": username,
             "dn": f"CN={employee.full_name},OU={employee.department or 'Usuarios'},OU=Usuarios,DC=corp,DC=local",
-            "password_last_set": datetime.now(timezone.utc).isoformat(),
+            "password_last_set": datetime.now(UTC).isoformat(),
             "last_sign_in": None,
             "mfa_registered": False,
             "licenses": list(employee.license_skus),
@@ -1115,17 +1171,54 @@ class MockEntraConnector(EntraConnector):
         self.store.log_event("entra.remove_all_group_memberships", id=uid, removed=removed)
         return {"user_id": uid, "removed_from": removed, "skipped": skipped}
 
-    async def assign_license(self, user_id: str, sku_part_numbers: list[str]) -> dict[str, Any]:
+    async def assign_license(
+        self,
+        user_id: str,
+        sku_part_numbers: list[str],
+        remove_sku_part_numbers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Mirror Graph: add and release in one operation, and keep seat counts honest.
+
+        The release half matters. Without it a mover who changes tier keeps both
+        SKUs forever, which is precisely the licence leak a transfer workflow
+        exists to prevent - and the plan's own summary claimed the drop had
+        happened, so nothing downstream would have noticed.
+        """
         user = self._u(user_id)
         current = set(user.get("licenses", []))
-        current.update(sku_part_numbers)
-        user["licenses"] = sorted(current)
+        before = set(current)
+
         for sku in sku_part_numbers:
-            entry = self.store.license_skus.get(sku)
-            if entry:
-                entry["consumed"] += 1
-        self.store.log_event("entra.assign_license", id=user["id"], skus=sku_part_numbers)
-        return {"user_id": user["id"], "assigned": sku_part_numbers}
+            if sku not in current:
+                current.add(sku)
+                entry = self.store.license_skus.get(sku)
+                if entry:
+                    entry["consumed"] = int(entry.get("consumed", 0)) + 1
+
+        removed: list[str] = []
+        for sku in remove_sku_part_numbers or []:
+            if sku in current:
+                current.discard(sku)
+                removed.append(sku)
+                entry = self.store.license_skus.get(sku)
+                if entry:
+                    entry["consumed"] = max(0, int(entry.get("consumed", 0)) - 1)
+
+        user["licenses"] = sorted(current)
+        self.store.log_event(
+            "entra.assign_license",
+            id=user["id"],
+            skus=sku_part_numbers,
+            removed=removed,
+        )
+        return {
+            "user_id": user["id"],
+            "assigned": sorted(current - before),
+            "removed": removed,
+            "requested": sku_part_numbers,
+            "release_requested": remove_sku_part_numbers or [],
+            "licenses": sorted(current),
+        }
 
     async def remove_all_licenses(self, user_id: str) -> dict[str, Any]:
         user = self._u(user_id)
@@ -1193,15 +1286,22 @@ class MockEntraConnector(EntraConnector):
     async def run_lifecycle_workflow(self, workflow_id: str, user_ids: list[str]) -> dict[str, Any]:
         resolved = [self._u(u)["id"] for u in user_ids]
         self.store.workflow_runs.append(
-            {"workflow_id": workflow_id, "users": resolved, "at": datetime.now(timezone.utc).isoformat()}
+            {"workflow_id": workflow_id, "users": resolved, "at": datetime.now(UTC).isoformat()}
         )
         return {"workflow_id": workflow_id, "users": resolved, "started": True, "simulated": True}
 
 
-def uuid4_hex() -> str:
+def new_object_id() -> str:
+    """A fresh Entra object id.
+
+    Renamed from ``uuid4_hex``, which returned a UUID *object* rather than a hex
+    string; its single caller wrapped it in ``str()``, so ids came out in the
+    dashed form the rest of the simulated estate uses. That output is preserved
+    deliberately - changing it would silently rekey persisted runs.
+    """
     import uuid
 
-    return uuid.uuid4()
+    return str(uuid.uuid4())
 
 
 def random_digit() -> int:

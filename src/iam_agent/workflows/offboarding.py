@@ -41,12 +41,12 @@ always require human approval, in every execution mode.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta, timezone
-from typing import Any
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Any, ClassVar
 
 from iam_agent.config import Settings
 from iam_agent.connectors import ConnectorHub
-from iam_agent.core.models import Device, DeviceOwnership, DeviceState, Employee
+from iam_agent.core.models import Device, DeviceOwnership
 from iam_agent.core.reconcile import Reconciler
 from iam_agent.core.result import ExecutionPlan, RiskLevel
 from iam_agent.workflows.base import Workflow, WorkflowContext, action, step
@@ -70,7 +70,7 @@ class OffboardingWorkflow(Workflow):
         "deferred phases and quarantines endpoints immediately."
     )
     platforms = ("entra", "m365", "active_directory", "action1", "scalefusion")
-    options_schema = {
+    options_schema: ClassVar[dict[str, Any]] = {
         "emergency": "Hostile/same-day termination. Quarantines endpoints immediately (default False).",
         "retain_mailbox": "Convert to shared mailbox instead of removing (default True).",
         "mailbox_delegate": "Email of the person who should get mailbox access (defaults to the manager).",
@@ -134,7 +134,7 @@ class OffboardingWorkflow(Workflow):
         if entra_user:
             try:
                 roles = await self.hub.entra.get_user_roles(entra_user.external_id)
-            except Exception:  # noqa: BLE001 - role read failure must not block planning
+            except Exception:
                 ctx.note("could not enumerate Entra directory roles; revoke_privileged_access will be skipped")
         if roles:
             ctx.note(
@@ -154,7 +154,7 @@ class OffboardingWorkflow(Workflow):
                 try:
                     manager_user = await self.hub.entra.get_user(entra_user.manager_id)
                     delegate = (manager_user.email if manager_user else "") or ""
-                except Exception:  # noqa: BLE001 - a missing manager must not block offboarding
+                except Exception:
                     delegate = ""
 
         # ---------------------------------------------------------------- #
@@ -612,7 +612,7 @@ class OffboardingWorkflow(Workflow):
                 action(
                     "active_directory.update_user", "active_directory",
                     self.hub.active_directory.update_user,
-                    description=f"Record the leaver reason in the AD description attribute",
+                    description="Record the leaver reason in the AD description attribute",
                     target=ad_id, risk=RiskLevel.LOW,
                     identifier=ad_id,
                     attributes={
@@ -628,7 +628,7 @@ class OffboardingWorkflow(Workflow):
                     description=f"Set the AD account to expire on {leave.isoformat()}",
                     target=ad_id, risk=RiskLevel.MEDIUM,
                     identifier=ad_id,
-                    expires_at=datetime.combine(leave, time(23, 59), tzinfo=timezone.utc),
+                    expires_at=datetime.combine(leave, time(23, 59), tzinfo=UTC),
                 )
             )
             if self.settings.active_directory.disabled_ou:
@@ -760,7 +760,7 @@ class DeferredDeletionWorkflow(Workflow):
         "schedule to keep the directory clean without ever deleting anything unattended."
     )
     platforms = ("entra",)
-    options_schema = {
+    options_schema: ClassVar[dict[str, Any]] = {
         "retention_days": "Days after the leave date before deletion is eligible (default 30).",
         "limit": "Maximum number of users to consider (default 50).",
     }
@@ -772,7 +772,7 @@ class DeferredDeletionWorkflow(Workflow):
         plan = self.new_plan(ctx)
         retention = int(ctx.opt("retention_days", 30))
         limit = int(ctx.opt("limit", 50))
-        cutoff = datetime.now(timezone.utc) - timedelta(days=retention)
+        cutoff = datetime.now(UTC) - timedelta(days=retention)
 
         disabled = await self.hub.entra.list_users(only_enabled=False, top=limit)
         eligible = []

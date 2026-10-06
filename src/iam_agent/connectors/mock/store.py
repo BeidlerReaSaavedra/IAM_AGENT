@@ -16,7 +16,7 @@ import json
 import random
 import threading
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ from iam_agent.core.models import DevicePlatform, normalize_logon
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # Deterministic id generation.
@@ -65,7 +65,7 @@ class _PersistingDict(dict):
     share state by definition; the simulator has to earn the same property.
     """
 
-    def __init__(self, store: "MockStore", *args: Any, **kwargs: Any) -> None:
+    def __init__(self, store: MockStore, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         # Bypass object.__setattr__ concerns: dict has no __slots__ issues here.
         object.__setattr__(self, "_store", store)
@@ -219,7 +219,9 @@ class MockStore:
 
     def __init__(self, *, seed: bool = True, persist_path: str | Path | None = None) -> None:
         self._lock = threading.RLock()
-        self.persist_path = Path(persist_path) if persist_path else None
+        # Absolute, for the same reason as the other stores: a relative path is
+        # resolved against the cwd in effect at write time, not construction time.
+        self.persist_path = Path(persist_path).expanduser().resolve() if persist_path else None
         # Seeding mints hundreds of ids and inserts hundreds of rows; writing the
         # estate back on each one would be quadratic. Suppressed until seeded.
         self._suppress_autosave = True
@@ -440,14 +442,16 @@ class MockStore:
 
             # Group membership
             for gname in cfg["groups"] + (["All-Employees"] if enabled else ["Leavers-Pending"]):
-                gid = self.group_id_by_name(gname)
-                if gid:
-                    self.groups[gid]["members"].append(uid)
+                # Distinct names from the seeding loop above, which binds gid/tid
+                # to a plain str; these lookups can legitimately miss.
+                member_gid = self.group_id_by_name(gname)
+                if member_gid:
+                    self.groups[member_gid]["members"].append(uid)
 
             for team_name in cfg["teams"]:
-                tid = self.team_id_by_name(team_name)
-                if tid:
-                    self.teams[tid]["members"].append(uid)
+                member_tid = self.team_id_by_name(team_name)
+                if member_tid:
+                    self.teams[member_tid]["members"].append(uid)
 
             # Mailbox
             self.mailboxes[uid] = {
@@ -500,7 +504,7 @@ class MockStore:
                 self.directory_roles[rid]["members"].append(laura)
 
         # Orphan: Bea stays enabled everywhere with a leave date in the past.
-        for uid, u in self.users.items():
+        for u in self.users.values():
             if u["employee_id"] == "EMP-1006":
                 u["employee_leave_date_time"] = (_utcnow() - timedelta(days=40)).isoformat()
                 u["account_enabled"] = True  # the bug the drift detector must find
@@ -713,10 +717,14 @@ class MockStore:
             return
         self.save()
 
+    def _ensure_directory(self) -> None:
+        if self.persist_path:
+            self.persist_path.parent.mkdir(parents=True, exist_ok=True)
+
     def save(self) -> None:
         if not self.persist_path:
             return
-        self.persist_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_directory()
         # Atomic: a crash mid-write must not leave a truncated estate that the
         # next process silently loads as "everything is gone".
         tmp = self.persist_path.with_suffix(".tmp")
@@ -798,7 +806,7 @@ def _configured_persist_path() -> str | None:
         from iam_agent.config import get_settings
 
         mock_settings = get_settings().mock
-    except Exception:  # noqa: BLE001 - settings may be mid-construction
+    except Exception:
         return None
     if not mock_settings.persist:
         return None

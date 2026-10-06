@@ -10,21 +10,20 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from iam_agent.config import AuditSettings
 
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 # Redaction lives in core.redact so that the audit log, the run store and the
 # approval queue cannot drift apart and leave one of them writing secrets.
-from iam_agent.core.redact import redact  # noqa: E402
+from iam_agent.core.redact import redact
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
 
 
 def _val(value: Any) -> Any:
@@ -53,7 +52,12 @@ class AuditLog:
 
     def __init__(self, settings: AuditSettings) -> None:
         self.settings = settings
-        self.path = Path(settings.log_path)
+        # Absolute: see RunStore. An audit log that fails to write because cwd
+        # moved is worse than no audit log, because the action still happened.
+        self.path = Path(settings.log_path).expanduser().resolve()
+        self._ensure_directory()
+
+    def _ensure_directory(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
 
@@ -71,14 +75,13 @@ class AuditLog:
             "outcome": fields.pop("outcome", None),
             "data": redact(fields) if self.settings.include_request_payloads else {},
         }
-        with self._lock:
-            with self.path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry, default=str) + "\n")
-                fh.flush()
-                try:
-                    os.fsync(fh.fileno())
-                except OSError:
-                    pass
+        with self._lock, self.path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+            fh.flush()
+            try:
+                os.fsync(fh.fileno())
+            except OSError:
+                pass
         return entry
 
     # Convenience wrappers ------------------------------------------------- #
@@ -185,34 +188,32 @@ class AuditLog:
         if not self.path.exists():
             return []
         rows: list[dict] = []
-        with self._lock:
-            with self.path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if event and entry.get("event") != event:
-                        continue
-                    if run_id and entry.get("run_id") != run_id:
-                        continue
-                    rows.append(entry)
+        with self._lock, self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event and entry.get("event") != event:
+                    continue
+                if run_id and entry.get("run_id") != run_id:
+                    continue
+                rows.append(entry)
         return rows[-n:]
 
     def stats(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         if not self.path.exists():
             return counts
-        with self._lock:
-            with self.path.open("r", encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    key = entry.get("event", "unknown")
-                    counts[key] = counts.get(key, 0) + 1
+        with self._lock, self.path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = entry.get("event", "unknown")
+                counts[key] = counts.get(key, 0) + 1
         return counts

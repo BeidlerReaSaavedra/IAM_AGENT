@@ -7,15 +7,13 @@ deployment boots in ``mock`` mode so the whole system can be exercised safely.
 
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import Literal
-
 import os
-from typing import Annotated, Mapping
+from collections.abc import Mapping
+from functools import lru_cache
+from typing import Annotated, Literal
 
 from pydantic import BeforeValidator, Field, field_validator
-from pydantic_settings import NoDecode
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # --------------------------------------------------------------------------- #
 # Enums / type aliases

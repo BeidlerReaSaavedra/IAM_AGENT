@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,14 +18,20 @@ import httpx
 from pydantic import BaseModel, Field, ValidationError
 
 from iam_agent.config import ApprovalSettings, Settings
-
-logger = logging.getLogger("iam_agent.approvals")
 from iam_agent.core.redact import safe_json
 from iam_agent.core.result import Action, RiskLevel, new_id
 
+logger = logging.getLogger("iam_agent.approvals")
+
+# `ApprovalStore.list()` shadows the builtin inside the class body, so an inline
+# `list[str]` annotation there refers to the method, not the type. Aliasing at
+# module scope keeps the annotations honest without renaming a public method that
+# the orchestrator, the API, the CLI and the MCP server all call.
+ApprovalIds = list[str]
+
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 ApprovalStatus = Literal["pending", "approved", "rejected", "expired", "cancelled"]
@@ -100,13 +106,21 @@ class ApprovalRequest(BaseModel):
         return "\n".join(lines)
 
 
+#: Aliased at module scope, *after* ApprovalRequest is defined: `ApprovalStore.list()`
+#: shadows the builtin inside the class body, so an inline `list[ApprovalRequest]`
+#: annotation there names the method rather than the type.
+ApprovalRequests = list["ApprovalRequest"]
+
+
 class ApprovalStore:
     """Thread-safe, file-backed approval queue."""
 
     def __init__(self, settings: ApprovalSettings) -> None:
         self.settings = settings
-        self.path = Path(settings.storage_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Absolute, for the same reason as RunStore: a relative path is resolved
+        # against the cwd in effect at write time, not construction time.
+        self.path = Path(settings.storage_path).expanduser().resolve()
+        self._ensure_directory()
         self._lock = threading.RLock()
         self._cache: dict[str, ApprovalRequest] = {}
         self.corrupt_lines = 0
@@ -155,7 +169,11 @@ class ApprovalStore:
         if skipped:
             logger.warning("%d approval record(s) in %s could not be loaded", skipped, self.path)
 
+    def _ensure_directory(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
     def _flush(self) -> None:
+        self._ensure_directory()
         tmp = self.path.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as fh:
             for req in sorted(self._cache.values(), key=lambda r: r.requested_at):
@@ -212,7 +230,7 @@ class ApprovalStore:
         status: ApprovalStatus | None = "pending",
         run_id: str | None = None,
         include_expired: bool = False,
-    ) -> list[ApprovalRequest]:
+    ) -> ApprovalRequests:
         with self._lock:
             items = list(self._cache.values())
 
@@ -224,7 +242,7 @@ class ApprovalStore:
             items = [r for r in items if r.effective_status() != "expired"]
         return sorted(items, key=lambda r: r.requested_at)
 
-    def pending(self) -> list[ApprovalRequest]:
+    def pending(self) -> ApprovalRequests:
         return self.list(status="pending")
 
     def decide(
@@ -277,9 +295,9 @@ class ApprovalStore:
                 self._flush()
             return req
 
-    def expire_stale(self) -> list[str]:
+    def expire_stale(self) -> ApprovalIds:
         """Mark timed-out requests as expired. Returns the affected IDs."""
-        expired: list[str] = []
+        expired: ApprovalIds = []
         with self._lock:
             for req in self._cache.values():
                 if req.is_expired:

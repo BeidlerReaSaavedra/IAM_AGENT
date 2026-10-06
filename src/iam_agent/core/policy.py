@@ -14,8 +14,9 @@ Design rules
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -209,7 +210,7 @@ class PolicyEngine:
                 requires_approval=False,
                 risk=risk,
                 reason="global dry-run enabled; action will be planned and logged, not applied",
-                applied_rules=applied + ["global_dry_run"],
+                applied_rules=[*applied, "global_dry_run"],
             )
 
         # 3. Operator rules take precedence over mode.
@@ -268,7 +269,7 @@ class PolicyEngine:
                 requires_approval=False,
                 risk=risk,
                 reason="execution mode is dry_run",
-                applied_rules=applied + ["mode:dry_run"],
+                applied_rules=[*applied, "mode:dry_run"],
             )
 
         if mode == "autonomous" and risk.rank <= ceiling.rank:
@@ -277,7 +278,7 @@ class PolicyEngine:
                 requires_approval=False,
                 risk=risk,
                 reason=f"autonomous mode, risk {risk.value} <= ceiling {ceiling.value}",
-                applied_rules=applied + ["mode:autonomous"],
+                applied_rules=[*applied, "mode:autonomous"],
             )
 
         # approval_required (default), or autonomous above the ceiling
@@ -289,7 +290,7 @@ class PolicyEngine:
                 f"execution mode '{mode}' requires approval for risk '{risk.value}' "
                 f"(autonomous ceiling: '{ceiling.value}')"
             ),
-            applied_rules=applied + [f"mode:{mode}"],
+            applied_rules=[*applied, f"mode:{mode}"],
         )
 
     # ---- capability guards ----------------------------------------------- #

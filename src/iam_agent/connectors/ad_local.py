@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from iam_agent.config import ActiveDirectorySettings
@@ -100,7 +100,7 @@ _USER_ATTRS = [
 ]
 
 # Windows FILETIME epoch: 1601-01-01, in 100ns ticks.
-_FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
+_FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
 
 
 def filetime_to_dt(value: Any) -> datetime | None:
@@ -117,7 +117,7 @@ def filetime_to_dt(value: Any) -> datetime | None:
 
 def datetime_to_filetime(value: datetime) -> int:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return int((value - _FILETIME_EPOCH).total_seconds() * 10_000_000)
 
 
@@ -154,8 +154,8 @@ def _guid_bytes_to_str(value: Any) -> str:
 
 def _map_ad_user(entry: dict[str, Any]) -> DirectoryUser:
     uac = _first(entry.get("userAccountControl"))
-    pwd_last_set = filetime_to_datetime(entry.get("pwdLastSet"))
-    last_logon = filetime_to_datetime(entry.get("lastLogonTimestamp"))
+    pwd_last_set = filetime_to_dt(entry.get("pwdLastSet"))
+    last_logon = filetime_to_dt(entry.get("lastLogonTimestamp"))
     return DirectoryUser(
         platform="active_directory",
         external_id=_guid_bytes_to_str(entry.get("objectGUID")) or _first(entry.get("distinguishedName")),
@@ -176,7 +176,7 @@ def _map_ad_user(entry: dict[str, Any]) -> DirectoryUser:
         employee_id=_first(entry.get("employeeID")),
         on_premises_sync=True,
         last_sign_in=last_logon,
-        account_expires=filetime_to_datetime(entry.get("accountExpires")),
+        account_expires=filetime_to_dt(entry.get("accountExpires")),
         raw={
             **{k: _first(v) if not isinstance(v, list) else v for k, v in entry.items()},
             "userAccountControl": uac,
@@ -244,13 +244,22 @@ class ADConnector(BaseConnector, abc.ABC):
     def disabled_container(self) -> str:
         return self.settings.disabled_ou or self.settings.users_ou or self.settings.base_dn
 
-    def build_dn(self, employee: Employee) -> str:
-        container = self.users_container
+    def build_dn(self, employee: Employee, *, container: str = "") -> str:
+        """Where a new user object should live.
+
+        ``container`` overrides the configured users OU. It used to be ignored:
+        ``create_user(..., ou=...)`` computed the override and then called this
+        without it, so an explicit OU silently produced an object in the default
+        one. For an identity agent that is not cosmetic - the wrong OU means the
+        wrong Group Policy, the wrong sync scope, or an object Entra Connect
+        never picks up at all.
+        """
+        base = container or self.users_container
         dept = (employee.department or "").strip()
         cn = employee.full_name
-        if dept and container:
-            return f"CN={cn},OU={dept},{container}"
-        return f"CN={cn},{container}"
+        if dept and base:
+            return f"CN={cn},OU={dept},{base}"
+        return f"CN={cn},{base}"
 
 
 # --------------------------------------------------------------------------- #
@@ -263,8 +272,12 @@ class LiveADConnector(ADConnector):
 
     def __init__(self, settings: ActiveDirectorySettings, audit: AuditLog | None = None) -> None:
         super().__init__(settings, audit)
-        self._server = None
-        self._conn = None
+        # `Any` because ldap3 ships no type information. Left unannotated, mypy
+        # infers the attribute as `None` from __init__ and then reports a
+        # misleading "function does not return a value" at the await in
+        # authenticate(), instead of naming the real problem.
+        self._server: Any = None
+        self._conn: Any = None
 
     # ---- connection ------------------------------------------------------ #
 
@@ -280,7 +293,13 @@ class LiveADConnector(ADConnector):
                 "IAM_AD_BIND_USER / IAM_AD_BIND_PASSWORD are required.", platform=self.name
             )
 
-    def _sync_connect(self):
+    def _sync_connect(self) -> Any:
+        """Blocking ldap3 bind, run in a worker thread.
+
+        Annotated ``Any`` because ldap3 ships no type information: without it
+        mypy concluded the function returned None, and `self._conn` looked like
+        it was always None after authenticate().
+        """
         import ssl
 
         from ldap3 import ALL, Connection, Server, Tls
@@ -322,7 +341,7 @@ class LiveADConnector(ADConnector):
             return
         self._conn = await asyncio.to_thread(self._sync_connect)
         self._token = "ldap-session"
-        self._token_expires_at = datetime.now(timezone.utc).timestamp() + 300
+        self._token_expires_at = datetime.now(UTC).timestamp() + 300
 
     async def health(self) -> HealthStatus:
         import time as _time
@@ -337,7 +356,7 @@ class LiveADConnector(ADConnector):
                 f"{root_dse.get('dnsHostName', 'domain')} | TLS={conn.server.ssl}",
                 (_time.monotonic() - started) * 1000,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return HealthStatus(
                 self.name, False, "live", f"{type(exc).__name__}: {exc}",
                 (_time.monotonic() - started) * 1000,
@@ -358,13 +377,17 @@ class LiveADConnector(ADConnector):
 
         try:
             return await asyncio.to_thread(_call)
-        except Exception as exc:  # noqa: BLE001 - normalise ldap3 exceptions
+        except Exception as exc:
             raise self._normalise(exc) from exc
 
     def _normalise(self, exc: Exception) -> ConnectorError:
         text = str(exc)
         lowered = text.lower()
-        if "invalidcredentials" in lowered or "49" in text and "data 52e" in lowered:
+        # LDAP error 49 with sub-code 52e is "invalid credentials". `and` binds
+        # tighter than `or`, so this already read as intended - but a bare
+        # `49` appearing anywhere in an unrelated message would be enough to
+        # misclassify, and the parens make the grouping impossible to misread.
+        if "invalidcredentials" in lowered or ("49" in text and "data 52e" in lowered):
             return AuthorizationError(f"AD bind failed: {text}", platform=self.name)
         if "data 530" in lowered:
             return AuthorizationError("AD refused the bind: insufficient rights", platform=self.name)
@@ -486,11 +509,11 @@ class LiveADConnector(ADConnector):
     # ---- writes ---------------------------------------------------------- #
 
     async def create_user(self, employee: Employee, *, password: str, ou: str = "") -> DirectoryUser:
-        dn = self.build_dn(employee)
+        container = ou or self.users_container
+        dn = self.build_dn(employee, container=container)
         cn = employee.full_name
         username = employee.suggested_username()
         upn = employee.suggested_upn(self.settings.upn_suffix)
-        container = ou or self.users_container
 
         attributes = {
             "objectClass": ["top", "person", "organizationalPerson", "user"],
@@ -508,7 +531,7 @@ class LiveADConnector(ADConnector):
             "mobile": employee.mobile_phone,
             "telephoneNumber": employee.office_phone,
             "employeeID": employee.employee_id,
-            "description": f"Created by IAM Agent on {datetime.now(timezone.utc).date()}",
+            "description": f"Created by IAM Agent on {datetime.now(UTC).date()}",
             # Created disabled; enabled only after the password is set.
             "userAccountControl": DEFAULT_UAC_DISABLED,
         }
@@ -724,7 +747,7 @@ class MockADConnector(ADConnector):
 
     async def authenticate(self) -> None:
         self._token = "mock-ldap-session"
-        self._token_expires_at = datetime.now(timezone.utc).timestamp() + 300
+        self._token_expires_at = datetime.now(UTC).timestamp() + 300
 
     async def health(self) -> HealthStatus:
         count = sum(1 for u in self.store.users.values() if u.get("on_premises_sync_enabled"))
@@ -846,7 +869,7 @@ class MockADConnector(ADConnector):
 
         username = employee.suggested_username()
         upn = employee.suggested_upn(self.settings.upn_suffix or "corp.local")
-        dn = self.build_dn(employee).replace(",DC=corp,DC=local", f",{self.base_dn}")
+        dn = self.build_dn(employee, container=ou).replace(",DC=corp,DC=local", f",{self.base_dn}")
         uid = f"ad-{username}-{len(self.store.users)}"
         self.store.users[uid] = {
             "id": uid,
@@ -866,7 +889,7 @@ class MockADConnector(ADConnector):
             "on_premises_sync_enabled": True,
             "on_premises_sam_account_name": username,
             "dn": dn,
-            "password_last_set": datetime.now(timezone.utc).isoformat(),
+            "password_last_set": datetime.now(UTC).isoformat(),
             "licenses": [],
             "manager_id": employee.manager.entra_id if employee.manager else "",
             "source": "ad",
@@ -962,7 +985,7 @@ class MockADConnector(ADConnector):
         if not raw:
             raise NotFoundError(f"mock AD: no user '{identifier}'", platform=self.name)
         raw["_provisional_password"] = password
-        raw["password_last_set"] = "0" if must_change else datetime.now(timezone.utc).isoformat()
+        raw["password_last_set"] = "0" if must_change else datetime.now(UTC).isoformat()
         self.store.log_event("ad.set_password", dn=raw.get("dn"), must_change=must_change)
         return {"dn": raw.get("dn"), "password_set": True, "must_change_at_logon": must_change}
 

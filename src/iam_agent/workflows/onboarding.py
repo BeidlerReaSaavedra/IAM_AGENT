@@ -30,11 +30,12 @@ mutates state is gated by the policy engine according to the active mode.
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC
+from typing import Any, ClassVar
 
 from iam_agent.config import Settings
 from iam_agent.connectors import ConnectorHub
-from iam_agent.core.models import Device, Employee, EmploymentType, IdentitySnapshot
+from iam_agent.core.models import Device, Employee, EmploymentType
 from iam_agent.core.reconcile import Reconciler
 from iam_agent.core.result import ExecutionPlan, RiskLevel
 from iam_agent.workflows.base import Workflow, WorkflowContext, action, step
@@ -53,7 +54,7 @@ class OnboardingWorkflow(Workflow):
         "for someone already provisioned will skip what exists and only fill the gaps."
     )
     platforms = ("entra", "m365", "active_directory", "action1", "scalefusion")
-    options_schema = {
+    options_schema: ClassVar[dict[str, Any]] = {
         "password": "Initial password. Generated when omitted (never logged).",
         "licenses": "List of SKU part numbers, e.g. ['ENTERPRISEPACK']. Defaults to config.",
         "groups": "Extra Entra group names to add beyond the department defaults.",
@@ -85,7 +86,7 @@ class OnboardingWorkflow(Workflow):
         if not domain:
             try:
                 domain = await self.hub.entra.get_default_domain()
-            except Exception:  # noqa: BLE001 - a missing Domain.Read.All must not block planning
+            except Exception:
                 domain = ""
             if domain:
                 ctx.assume(f"No domain configured; inferred the tenant default '{domain}' for the UPN.")
@@ -200,7 +201,7 @@ class OnboardingWorkflow(Workflow):
                         f"manager '{employee.manager.email}' does not exist in Entra; "
                         "the reporting line will be left unset"
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 ctx.note(f"could not resolve manager '{employee.manager.email}': {exc}")
         create_actions = [
             action(
@@ -352,9 +353,9 @@ class OnboardingWorkflow(Workflow):
             if employee.employment_type in (
                 EmploymentType.CONTRACTOR, EmploymentType.INTERN
             ) and employee.leave_date and ctx.flag("contractor_expiry", True):
-                from datetime import datetime, time, timezone as _tz
+                from datetime import datetime, time
 
-                expiry = datetime.combine(employee.leave_date, time(23, 59), tzinfo=_tz.utc)
+                expiry = datetime.combine(employee.leave_date, time(23, 59), tzinfo=UTC)
                 ad_actions.append(
                     action(
                         "active_directory.set_account_expiry", "active_directory",
@@ -656,10 +657,10 @@ def _hr_attributes(employee: Employee, ctx: WorkflowContext) -> dict[str, Any]:
         "preferredLanguage": ctx.opt("locale", "es-ES"),
     }
     if employee.hire_date:
-        from datetime import datetime, time, timezone
+        from datetime import datetime, time
 
         attrs["employeeHireDate"] = datetime.combine(
-            employee.hire_date, time(9, 0), tzinfo=timezone.utc
+            employee.hire_date, time(9, 0), tzinfo=UTC
         ).isoformat()
     return {k: v for k, v in attrs.items() if v not in (None, "")}
 

@@ -47,11 +47,11 @@ class WorkflowRegistry:
 
 
 __all__ = [
-    "WorkflowRegistry",
     "WORKFLOW_CLASSES",
-    "Workflow",
-    "OnboardingWorkflow",
-    "OffboardingWorkflow",
-    "TransferWorkflow",
     "DeferredDeletionWorkflow",
+    "OffboardingWorkflow",
+    "OnboardingWorkflow",
+    "TransferWorkflow",
+    "Workflow",
+    "WorkflowRegistry",
 ]

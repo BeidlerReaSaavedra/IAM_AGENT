@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date
-from typing import Any
+from typing import Any, Literal, cast
 
 from mcp.server.mcpserver import MCPServer
 
@@ -129,7 +129,7 @@ def build_server(settings: Settings | None = None) -> MCPServer:
     return server
 
 
-def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registration block
+def _register_tools(server: MCPServer) -> None:
     # ======================================================================= #
     # STATUS & PREFLIGHT
     # ======================================================================= #
@@ -217,13 +217,13 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
         if entra:
             try:
                 roles = await orch.hub.entra.get_user_roles(entra.external_id)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 roles = [{"error": str(exc)}]
             try:
                 teams = [
                     t.get("displayName") for t in await orch.hub.m365.find_user_teams(entra.external_id)
                 ]
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 teams = [{"error": str(exc)}]
         return _json(
             {
@@ -549,7 +549,7 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
                     if emp.manager and emp.manager.email and not merged.manager:
                         merged.manager = emp.manager
                     emp = merged
-            except Exception:  # noqa: BLE001 - fall back to the caller-supplied record
+            except Exception:
                 pass
         emp.lifecycle_state = LifecycleState.LEAVER
 
@@ -590,7 +590,7 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
                     if emp.job_title:
                         merged.job_title = emp.job_title
                     emp = merged
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         run = await orch.run_workflow(
             "transfer", emp, options=options or {}, requested_by="claude",
@@ -971,7 +971,7 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
     async def show_approval(approval_id: str) -> str:
         try:
             request = get_orchestrator().get_approval(approval_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _json({"error": str(exc)})
         return _json(
             {
@@ -1013,7 +1013,7 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
             )
         except ValueError as exc:
             return _json({"error": str(exc), "hint": "two-person integrity requires a distinct approver"})
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _json({"error": str(exc)})
 
     # ======================================================================= #
@@ -1044,7 +1044,7 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
     async def get_run(run_id: str) -> str:
         try:
             return _json(get_orchestrator().run_detail(run_id))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _json({"error": str(exc)})
 
     @server.tool(
@@ -1059,7 +1059,7 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
         try:
             run = await get_orchestrator().cancel_run(run_id, reason)
             return _json(run.summary())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _json({"error": str(exc)})
 
     @server.tool(
@@ -1074,7 +1074,7 @@ def _register_tools(server: MCPServer) -> None:  # noqa: C901 - one flat registr
     async def rollback_run(run_id: str) -> str:
         try:
             return _json(await get_orchestrator().rollback_run(run_id))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return _json({"error": str(exc)})
 
     # ======================================================================= #
@@ -1248,10 +1248,21 @@ def _result_for(run: Any, action_summary: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+#: MCPServer.run() dispatches on a Literal, so an arbitrary string from the
+#: environment would not match any overload - and a typo would surface as an
+#: opaque error from inside the library rather than at the boundary.
+_MCP_TRANSPORTS = ("stdio", "sse", "streamable-http")
+
+
 def main() -> None:
     """stdio entrypoint for Claude Desktop / Claude Code."""
+    requested = os.environ.get("IAM_MCP_TRANSPORT", "stdio")
+    if requested not in _MCP_TRANSPORTS:
+        raise SystemExit(
+            f"IAM_MCP_TRANSPORT={requested!r} is not one of {', '.join(_MCP_TRANSPORTS)}"
+        )
     server = build_server()
-    server.run(transport=os.environ.get("IAM_MCP_TRANSPORT", "stdio"))
+    server.run(transport=cast(Literal["stdio", "sse", "streamable-http"], requested))
 
 
 if __name__ == "__main__":

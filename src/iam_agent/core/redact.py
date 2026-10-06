@@ -77,7 +77,7 @@ def _compact_model(obj: BaseModel) -> Any:
     }
     try:
         data = obj.model_dump(mode="json", exclude_none=True)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return str(obj)[:200]
     compact = {k: v for k, v in data.items() if k in keep and v not in (None, "", [])}
     # Anything not whitelisted is summarised rather than dumped in full.
@@ -110,4 +110,4 @@ def safe_json(value: Any, *, limit: int = 4000) -> str:
     return text
 
 
-__all__ = ["redact", "safe_params", "safe_json", "is_secret_field", "REDACTED"]
+__all__ = ["REDACTED", "is_secret_field", "redact", "safe_json", "safe_params"]

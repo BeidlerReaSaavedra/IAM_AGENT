@@ -17,15 +17,11 @@ import json
 from datetime import date
 from pathlib import Path
 
-import pytest
-
-from iam_agent.config import Settings
+from conftest import approve_everything
 from iam_agent.core.approval import ApprovalStore
 from iam_agent.core.models import Employee, Manager
 from iam_agent.core.orchestrator import Orchestrator
 from iam_agent.core.result import RunRecord, RunStatus, RunStore
-
-from conftest import approve_everything
 
 
 def _hire(**overrides) -> Employee:
@@ -82,7 +78,6 @@ def test_approval_queue_survives_a_new_store_instance(settings):
 
 def test_run_store_round_trips_a_parked_run(settings):
     """A run saved mid-flight must reload with its plan, params and statuses intact."""
-    orch = Orchestrator(settings)
     store = RunStore(settings.audit.run_store_path)
 
     run = RunRecord(
@@ -138,8 +133,8 @@ async def test_second_orchestrator_can_approve_a_run_parked_by_the_first(setting
 
 async def test_no_secret_survives_the_round_trip(settings):
     """Rehydration must not resurrect a credential that redaction removed on write."""
-    orch = Orchestrator(settings)
-    run = await orch.run_workflow(
+    orchestrator = Orchestrator(settings)
+    await orchestrator.run_workflow(
         "onboarding",
         _hire(),
         options={"password": "Sup3r-Canary"},
@@ -154,7 +149,7 @@ async def test_no_secret_survives_the_round_trip(settings):
 
     approvals_blob = Path(settings.approval.storage_path).read_text(encoding="utf-8")
     assert "Sup3r-Canary" not in approvals_blob
-    await orch.aclose()
+    await orchestrator.aclose()
 
 
 def test_corrupt_line_is_skipped_without_losing_the_rest(settings, tmp_path):

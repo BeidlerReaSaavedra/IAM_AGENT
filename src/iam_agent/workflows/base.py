@@ -16,8 +16,9 @@ That separation is deliberate:
 from __future__ import annotations
 
 import abc
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any, ClassVar
 
 from iam_agent.config import Settings
 from iam_agent.connectors import ConnectorHub
@@ -162,7 +163,11 @@ class Workflow(abc.ABC):
     #: Which platforms the workflow touches (used for pre-flight health checks).
     platforms: tuple[str, ...] = ()
     #: Options the caller may override, with defaults. Documented for Claude.
-    options_schema: dict[str, Any] = {}
+    #: ClassVar, not an instance attribute: subclasses replace it wholesale and
+    #: nothing mutates it in place, but the annotation makes that a rule rather
+    #: than a coincidence - a future `self.options_schema[...] = ...` would
+    #: otherwise leak into every other instance of the class.
+    options_schema: ClassVar[dict[str, Any]] = {}
 
     def __init__(self, hub: ConnectorHub, settings: Settings) -> None:
         self.hub = hub
@@ -203,12 +208,12 @@ class Workflow(abc.ABC):
 
 
 __all__ = [
-    "Workflow",
-    "WorkflowContext",
     "Action",
     "ExecutionPlan",
     "PlanStep",
     "RiskLevel",
+    "Workflow",
+    "WorkflowContext",
     "action",
     "step",
 ]

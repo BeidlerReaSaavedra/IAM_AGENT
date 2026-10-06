@@ -25,13 +25,14 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from iam_agent import __version__
 from iam_agent.config import Settings, get_settings
 from iam_agent.core.errors import IAMAgentError
 from iam_agent.core.models import LifecycleState, Manager
 from iam_agent.core.orchestrator import Orchestrator
+
 _orchestrator: Orchestrator | None = None
 
 
@@ -126,6 +127,25 @@ class HRWebhookEvent(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+def _signature_matches(secret: str, raw: bytes, provided: str | None) -> bool:
+    """Constant-time check of an HMAC-SHA256 webhook signature.
+
+    Both vendors sign the raw request body, but they disagree on the wire format:
+    GitHub-style senders prefix with ``sha256=``, others send the bare hex digest.
+    Scalefusion's exact format is not documented, so accept either - a verifier
+    that only matched one spelling would reject every legitimate event, and the
+    failure looks identical to an attacker being turned away.
+
+    Single implementation on purpose: two copies of HMAC verification drift, and
+    drift here fails silently in whichever direction the mismatched one allows.
+    """
+    if not secret:
+        return True
+    expected = hmac.new(secret.encode(), raw or b"", "sha256").hexdigest()
+    candidate = (provided or "").strip().removeprefix("sha256=").strip().lower()
+    return hmac.compare_digest(expected, candidate)
+
+
 def _settings_of(request: Request) -> Settings:
     """Settings the app was actually built with.
 
@@ -198,7 +218,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def _register_routes(app: FastAPI) -> None:  # noqa: C901
+def _register_routes(app: FastAPI) -> None:
     # ------------------------------------------------------------------ #
     # Health & posture
     # ------------------------------------------------------------------ #
@@ -461,7 +481,11 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901
 
     @app.post("/runs/{run_id}/cancel", tags=["runs"])
     async def cancel_run(run_id: str, reason: str = "") -> dict[str, Any]:
-        return get_orch().cancel_run(run_id, reason).model_dump(mode="json", exclude={"plan"})
+        # cancel_run is a coroutine; without the await this returned the coroutine
+        # object itself and FastAPI serialised it as an empty structure, so a
+        # cancellation looked like it had succeeded while nothing happened.
+        cancelled = await get_orch().cancel_run(run_id, reason)
+        return cancelled.model_dump(mode="json", exclude={"plan"})
 
     @app.post("/runs/{run_id}/rollback", tags=["runs"])
     async def rollback_run(run_id: str) -> dict[str, Any]:
@@ -545,7 +569,7 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901
 
     @app.post("/webhooks/hr", tags=["webhooks"])
     async def hr_webhook(
-        request: Request, body: HRWebhookEvent, x_hub_signature: str | None = Header(default=None)
+        request: Request, x_hub_signature: str | None = Header(default=None)
     ) -> dict[str, Any]:
         """Joiner/mover/leaver events from an HR system.
 
@@ -553,15 +577,27 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901
         ``IAM_API_HR_WEBHOOK_SECRET`` is configured; unsigned requests are
         rejected in that case, because an unauthenticated leaver event is a
         denial-of-service vector against your own staff.
+
+        The payload is deliberately NOT declared as a typed parameter. FastAPI
+        validates declared body parameters before the handler runs, which put
+        signature checking *second*: an unsigned request with a malformed body
+        came back 422 instead of 401, so the schema was probeable without a
+        secret and a bad signature never got reported. Verify first, then parse.
         """
         settings = _settings_of(request)
         secret = settings.api.hr_webhook_secret
-        if secret:
-            raw = await request.body()
-            expected = hmac.new(secret.encode(), raw, "sha256").hexdigest()
-            provided = (x_hub_signature or "").removeprefix("sha256=").strip()
-            if not hmac.compare_digest(expected, provided):
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
+        raw = await request.body()
+        if not _signature_matches(secret, raw, x_hub_signature):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
+
+        try:
+            body = HRWebhookEvent.model_validate_json(raw or b"{}")
+        except ValidationError as exc:
+            # Literal 422 rather than status.HTTP_422_UNPROCESSABLE_ENTITY: that
+            # constant is deprecated in recent Starlette in favour of
+            # ..._UNPROCESSABLE_CONTENT, and depending on either name would tie
+            # this to a version range for no benefit.
+            raise HTTPException(422, f"malformed HR event: {exc.errors()[:3]}") from None
 
         mapping = {"joiner": "onboarding", "mover": "transfer", "leaver": "offboarding"}
         workflow = mapping[body.event_type]
@@ -595,10 +631,8 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901
         settings = _settings_of(request)
         secret = settings.api.scalefusion_webhook_secret
         raw = await request.body()
-        if secret:
-            expected = hmac.new(secret.encode(), raw, "sha256").hexdigest()
-            if not hmac.compare_digest(expected, (x_scalefusion_signature or "").strip()):
-                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
+        if secret and not _signature_matches(secret, raw, x_scalefusion_signature):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid webhook signature")
 
         try:
             payload = json.loads(raw or b"{}")
@@ -610,8 +644,15 @@ def _register_routes(app: FastAPI) -> None:  # noqa: C901
         owner = str(payload.get("user_email") or payload.get("email") or "")
 
         orch = get_orch()
+        # `workflow_event(event, run_id="", **fields)` already owns the name
+        # `event`, so passing it again as a keyword raises TypeError: got
+        # multiple values for keyword argument 'event'. Every Scalefusion webhook
+        # would have 500'd before doing anything.
         orch.audit.workflow_event(
-            "scalefusion_webhook", event=event, device_id=device_id, owner=owner
+            "scalefusion_webhook",
+            device_event=event,
+            device_id=device_id,
+            owner=owner,
         )
 
         result: dict[str, Any] = {"received": True, "event": event, "device_id": device_id, "owner": owner}

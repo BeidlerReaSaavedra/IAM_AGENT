@@ -17,12 +17,10 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from iam_agent.agent.loop import FORBIDDEN_DECIDERS, AgentLoop, WITHHELD_TOOLS
+from conftest import approve_everything
+from iam_agent.agent.loop import FORBIDDEN_DECIDERS, WITHHELD_TOOLS, AgentLoop
 from iam_agent.config import Settings
 from iam_agent.connectors.mock.store import get_mock_store
-
-from conftest import approve_everything
-
 
 # --------------------------------------------------------------------------- #
 # A scripted stand-in for the Anthropic client
@@ -301,7 +299,7 @@ async def test_withheld_tool_is_refused_mid_conversation(settings):
 
     assert outcome.tool_calls[0]["error"] is True
     messages = loop.client.messages.calls[1]["messages"]
-    refusal = [b for b in messages[-1]["content"] if b.get("type") == "tool_result"][0]
+    refusal = next(b for b in messages[-1]["content"] if b.get("type") == "tool_result")
     assert "not available to the agent" in refusal["content"]
 
     # Nothing was decided anywhere.

@@ -17,7 +17,7 @@ directly rather than re-deriving the reasoning.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from iam_agent.config import Settings
@@ -191,7 +191,7 @@ class Reconciler:
         """Await a connector call, converting failures into a warning."""
         try:
             return await coro
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             warnings.append(f"{label}: {type(exc).__name__}: {exc}")
             return None
 
@@ -211,10 +211,11 @@ class Reconciler:
         state = LifecycleState.ACTIVE
         if not src.enabled:
             state = LifecycleState.LEAVER
-        elif leave and _as_date(leave) and _as_date(leave) < date.today():
-            # Enabled with a leave date already passed: still ACTIVE by flag but
-            # the drift detector will call this out as an orphan.
-            state = LifecycleState.ACTIVE
+        # Note the case we deliberately do NOT model here: an account that is
+        # still enabled but carries an employeeLeaveDateTime in the past. It stays
+        # ACTIVE because that is what the directory says, and the drift detector
+        # reports it as an orphan instead. Inferring LEAVER from a date would make
+        # this snapshot disagree with the platform it is describing.
 
         manager_email = ""
         if isinstance(raw.get("manager"), dict):
@@ -446,7 +447,7 @@ class Reconciler:
 
         # 9. Dormant account ------------------------------------------------- #
         if entra and entra.enabled and entra.last_sign_in:
-            idle = datetime.now(timezone.utc) - entra.last_sign_in
+            idle = datetime.now(UTC) - entra.last_sign_in
             if idle > timedelta(days=90):
                 findings.append(
                     DriftFinding(

@@ -17,12 +17,10 @@ Graph call to avoid a gap), and re-pointing the reporting line.
 
 from __future__ import annotations
 
-from datetime import date
-from typing import Any
+from typing import Any, ClassVar
 
 from iam_agent.config import Settings
 from iam_agent.connectors import ConnectorHub
-from iam_agent.core.models import Employee
 from iam_agent.core.result import ExecutionPlan, RiskLevel
 from iam_agent.workflows.base import Workflow, WorkflowContext, action, step
 from iam_agent.workflows.onboarding import (
@@ -44,7 +42,7 @@ class TransferWorkflow(Workflow):
         "throughout. Licence changes are applied in a single Graph call to avoid any service gap."
     )
     platforms = ("entra", "m365", "active_directory", "scalefusion")
-    options_schema = {
+    options_schema: ClassVar[dict[str, Any]] = {
         "target_department": "The department being moved into (required unless target_title given).",
         "target_title": "New job title.",
         "target_licenses": "Explicit SKU list; defaults to the target department's baseline.",
@@ -114,7 +112,7 @@ class TransferWorkflow(Workflow):
         try:
             user_teams = await self.hub.m365.find_user_teams(identifier)
             current_teams = {t.get("displayName", "") for t in user_teams}
-        except Exception:  # noqa: BLE001
+        except Exception:
             ctx.note("could not enumerate current Teams membership; Team changes will be additive only")
 
         teams_to_add = sorted(target_teams - current_teams)
@@ -195,7 +193,7 @@ class TransferWorkflow(Workflow):
             try:
                 manager_user = await self.hub.entra.get_user(new_manager)
                 manager_id = manager_user.external_id if manager_user else ""
-            except Exception:  # noqa: BLE001
+            except Exception:
                 ctx.note(f"could not resolve new manager '{new_manager}'")
         elif employee.manager and employee.manager.entra_id:
             manager_id = employee.manager.entra_id
@@ -222,29 +220,32 @@ class TransferWorkflow(Workflow):
         # 3. Licence change (single call: add and remove together)
         # ---------------------------------------------------------------- #
         if license_delta or license_drop:
+            # One action, one Graph call, both halves.
+            #
+            # Two separate actions would need an ordering guarantee the executor
+            # does not provide inside a step, and a failure between them strands
+            # the person holding both SKUs - a silent, permanent licence leak.
+            #
+            # The previous `remove_all_licenses` fallback was worse still: it
+            # strips every licence including the one just granted. That is why it
+            # was gated on `not license_delta` - which in turn meant that a tier
+            # *change*, the common case, never released anything at all while the
+            # plan's own summary claimed it had.
             plan.add(
                 step(
                     3, "licence_change", "entra",
                     action(
                         "entra.assign_license", "entra", self.hub.entra.assign_license,
                         description=(
-                            f"Add {license_delta or 'nothing'}, then release {license_drop or 'nothing'}. "
-                            "Add before remove so there is no service gap."
+                            f"Add {license_delta or 'nothing'} and release "
+                            f"{license_drop or 'nothing'} in a single assignLicense call, "
+                            "so there is no service gap and no superseded SKU left behind."
                         ),
                         target=identifier, risk=RiskLevel.MEDIUM,
-                        user_id=identifier, sku_part_numbers=license_delta,
+                        user_id=identifier,
+                        sku_part_numbers=license_delta,
+                        remove_sku_part_numbers=license_drop,
                     ),
-                    *([
-                        action(
-                            "entra.remove_all_licenses", "entra", self.hub.entra.remove_all_licenses,
-                            description=(
-                                f"Release the superseded licence(s) {license_drop}. Only used when the "
-                                "target role needs a strictly smaller set."
-                            ),
-                            target=identifier, risk=RiskLevel.HIGH,
-                            user_id=identifier,
-                        )
-                    ] if license_drop and not license_delta else []),
                     description="Licence moves must be atomic to avoid losing Exchange/Teams mid-day.",
                     depends_on=["attributes"],
                     continue_on_error=True,

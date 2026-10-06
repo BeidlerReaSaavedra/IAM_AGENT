@@ -21,8 +21,9 @@ Claude's tool description simultaneously.
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any, Callable, get_type_hints
+from typing import Any, get_type_hints
 
 from pydantic import BaseModel
 
@@ -83,7 +84,7 @@ class ActionDispatcher:
         if key not in self._hints:
             try:
                 hints = get_type_hints(func)
-            except Exception:  # noqa: BLE001 - unresolved forward refs must not break dispatch
+            except Exception:
                 hints = {}
             hints.pop("return", None)
             self._hints[key] = hints
@@ -111,7 +112,15 @@ class ActionDispatcher:
         """Resolve, coerce and await one operation."""
         func = self.resolve(operation)
         if func is None:
-            self.assert_resolvable(operation)  # raises with a precise message
+            # assert_resolvable() raises UnknownOperationError naming the platform
+            # and the method it could not find. The unreachable raise below exists
+            # so that `func` cannot be None past this point for the type checker -
+            # dispatching through None would otherwise be a TypeError with no
+            # context about which operation failed.
+            self.assert_resolvable(operation)
+            raise UnknownOperationError(
+                f"operation '{operation}' cannot be resolved", details={"operation": operation}
+            )
         kwargs = self.coerce(func, params)
         result = func(**kwargs)
         if inspect.isawaitable(result):
@@ -123,14 +132,14 @@ def _coerce_value(value: Any, expected: Any, name: str, signature: inspect.Signa
     if expected is None or value is None:
         return value
 
-    # Unwrap Optional[X] / X | None
-    origin = getattr(expected, "__origin__", None)
+    # Unwrap Optional[X] / X | None down to the concrete type we can validate
+    # against. `__origin__` is deliberately not consulted: generic containers are
+    # left as-is below, because JSON already round-trips them correctly.
     args = getattr(expected, "__args__", None)
-    if args and type(None) in args:  # noqa: E721
-        non_null = [a for a in args if a is not type(None)]  # noqa: E721
+    if args and type(None) in args:
+        non_null = [a for a in args if a is not type(None)]
         if len(non_null) == 1:
             expected = non_null[0]
-            origin = getattr(expected, "__origin__", None)
 
     if isinstance(expected, type) and issubclass(expected, BaseModel) and isinstance(value, dict):
         return expected.model_validate(value)
@@ -150,4 +159,4 @@ def _coerce_value(value: Any, expected: Any, name: str, signature: inspect.Signa
     return value
 
 
-__all__ = ["ActionDispatcher", "UnknownOperationError", "OPERATION_ALIASES"]
+__all__ = ["OPERATION_ALIASES", "ActionDispatcher", "UnknownOperationError"]

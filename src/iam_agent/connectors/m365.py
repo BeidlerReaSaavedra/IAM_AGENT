@@ -13,6 +13,7 @@ and are intentionally left as an extension point rather than a hard dependency.
 from __future__ import annotations
 
 import abc
+from datetime import UTC
 from typing import Any
 
 from iam_agent.config import M365Settings
@@ -20,7 +21,7 @@ from iam_agent.connectors.base import BaseConnector, HealthStatus, NotConfigured
 from iam_agent.connectors.mock.store import MockStore, get_mock_store
 from iam_agent.core.audit import AuditLog
 from iam_agent.core.errors import NotFoundError
-from iam_agent.core.models import DirectoryUser, MailboxInfo
+from iam_agent.core.models import MailboxInfo
 
 OP = "m365"
 OPS = {
@@ -139,7 +140,10 @@ class LiveM365Connector(M365Connector):
 
     def __init__(self, settings: M365Settings, audit: AuditLog | None = None) -> None:
         super().__init__(settings, audit)
-        self._app = None
+        # msal is untyped, and `None` here made mypy infer the attribute as
+        # None-only, so the acquire_token_for_client call below looked like a
+        # guaranteed AttributeError.
+        self._app: Any = None
 
     async def authenticate(self) -> None:
         if self._app is None:
@@ -174,7 +178,7 @@ class LiveM365Connector(M365Connector):
                 self.name, True, "live", f"{len(skus)} subscribed SKUs visible",
                 (_time.monotonic() - started) * 1000,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return HealthStatus(
                 self.name, False, "live", f"{type(exc).__name__}: {exc}",
                 (_time.monotonic() - started) * 1000,
@@ -226,7 +230,7 @@ class LiveM365Connector(M365Connector):
             settings = await self.request("GET", self._g(f"users/{raw['id']}/mailboxSettings"))
             rules = settings.get("automaticRepliesSetting") or {}
             info.raw_extra = rules  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 - MailboxSettings.Basic requires Exchange licence
+        except Exception:
             pass
         return info
 
@@ -458,7 +462,7 @@ class LiveM365Connector(M365Connector):
         roles: list[str] | None = None,
         expiry_days: int = 30,
     ) -> dict[str, Any]:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         drives = await self.get_user_drives(user_id)
         one_drive = next((d for d in drives if d.get("driveType") == "personal"), drives[0] if drives else None)
@@ -472,7 +476,7 @@ class LiveM365Connector(M365Connector):
             "sendInvitation": True,
             "roles": roles or ["read"],
             "expirationDateTime": (
-                datetime.now(timezone.utc) + timedelta(days=expiry_days)
+                datetime.now(UTC) + timedelta(days=expiry_days)
             ).isoformat(),
         }
         created = await self.request(
@@ -489,8 +493,9 @@ class LiveM365Connector(M365Connector):
 
 
 def _build_msal_app(settings: M365Settings):
-    import msal
     from pathlib import Path
+
+    import msal
 
     kwargs: dict[str, Any] = {}
     if settings.certificate_path:

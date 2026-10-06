@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import abc
 import time
+from datetime import UTC
 from typing import Any
 
 from iam_agent.config import Action1Settings
@@ -287,7 +288,8 @@ class LiveAction1Connector(Action1Connector):
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        self.audit and self.audit.api_call(self.name, "POST", url, response.status_code, 0.0)
+        if self.audit is not None:
+            self.audit.api_call(self.name, "POST", url, response.status_code, 0.0)
 
         if response.status_code != 200:
             from iam_agent.core.errors import AuthenticationError
@@ -316,7 +318,7 @@ class LiveAction1Connector(Action1Connector):
                 f"{len(orgs)} organization(s): {names} @ {self.base}",
                 (time.monotonic() - started) * 1000,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return HealthStatus(
                 self.name, False, "live", f"{type(exc).__name__}: {exc}", (time.monotonic() - started) * 1000
             )
@@ -621,11 +623,11 @@ class MockAction1Connector(Action1Connector):
             )
             if target and target not in group["endpoints"]:
                 group["endpoints"].append(target)
-                for e in self.store.action1_endpoints[target].setdefault("groups", []):
-                    pass
-                self.store.action1_endpoints[target].setdefault("groups", [])
-                if gid not in self.store.action1_endpoints[target]["groups"]:
-                    self.store.action1_endpoints[target]["groups"].append(gid)
+                # Keep both directions of the relationship in sync: the group
+                # lists its members and the endpoint lists its groups.
+                membership = self.store.action1_endpoints[target].setdefault("groups", [])
+                if gid not in membership:
+                    membership.append(gid)
                 resolved.append(target)
         self.store.log_event("action1.add_endpoints_to_group", group=gid, endpoints=resolved)
         return {"group_id": gid, "added": resolved, "group_name": group["name"]}
@@ -688,9 +690,9 @@ class MockAction1Connector(Action1Connector):
 
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def build_action1_connector(

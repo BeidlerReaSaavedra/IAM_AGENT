@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import unicodedata
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def normalize_logon(value: str) -> str:
@@ -189,7 +189,7 @@ class Employee(BaseModel):
     """Entra directory role names, e.g. ``User Administrator``."""
 
     # --- Endpoints ------------------------------------------------------ #
-    devices: list["DeviceAssignment"] = Field(default_factory=list)
+    devices: list[DeviceAssignment] = Field(default_factory=list)
 
     # --- Correlation ---------------------------------------------------- #
     identities: list[IdentityRef] = Field(default_factory=list)

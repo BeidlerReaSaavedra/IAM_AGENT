@@ -216,7 +216,7 @@ class AgentLoop:
             result = await self.server.call_tool(name, arguments or {})
         except IAMAgentError as exc:
             return json.dumps(exc.to_dict(), ensure_ascii=False), True
-        except Exception as exc:  # noqa: BLE001 - the model must see the failure, not a crash
+        except Exception as exc:
             return (
                 json.dumps(
                     {"error": type(exc).__name__, "detail": str(exc)[:2000]}, ensure_ascii=False
@@ -309,7 +309,7 @@ class AgentLoop:
                     console.print(
                         f"[yellow]stopped after {self.max_turns} turns without settling[/yellow]"
                     )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             outcome.error = f"{type(exc).__name__}: {exc}"
             outcome.stop_reason = "error"
             if not self.quiet:
@@ -335,7 +335,7 @@ class AgentLoop:
                 continue
             try:
                 request = orch.get_approval(approval_id)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
 
             if not self.quiet:
@@ -477,9 +477,9 @@ def _ask_operator(request: Any) -> tuple[bool, str] | None:
 
 
 __all__ = [
+    "FORBIDDEN_DECIDERS",
+    "WITHHELD_TOOLS",
     "AgentLoop",
     "AgentOutcome",
-    "WITHHELD_TOOLS",
-    "FORBIDDEN_DECIDERS",
     "resolve_prompt_path",
 ]

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 from datetime import date, datetime
 from typing import Any
 
@@ -91,26 +90,51 @@ def _employee(
     leave_date: str = "",
     reason: str = "",
 ) -> Employee:
-    """Build an Employee from CLI flags, tolerating a bare identifier."""
+    """Build an Employee from CLI flags, tolerating a bare identifier.
+
+    ``first_name`` and ``last_name`` are the only fields on :class:`Employee`
+    without a default, so they must always be supplied - even as empty strings.
+    The previous version dropped every empty value, which made both natural
+    invocations fail with a pydantic ValidationError:
+
+        iam-agent onboard "Aina Serra"      # no name flags at all
+        iam-agent offboard nserra           # looked up by username
+
+    For the second case an empty name is correct: the workflow resolves the
+    person from the directory. For the first, the identifier *is* the name, so
+    split it - first token as given name, the rest as surname, which keeps
+    composite Spanish and Catalan surnames ("Miquel Àngel Camps") intact.
+    """
+    if identifier and "@" not in identifier and " " in identifier.strip():
+        if not first_name and not last_name:
+            given, _, rest = identifier.strip().partition(" ")
+            first_name = first_name or given
+            last_name = last_name or rest.strip()
+
+    # Required fields stay in the dict even when empty.
     kwargs: dict[str, Any] = {
-        "employee_id": employee_id,
         "first_name": first_name,
         "last_name": last_name,
+    }
+    optional: dict[str, Any] = {
+        "employee_id": employee_id,
         "department": department,
         "job_title": job_title,
         "termination_reason": reason,
     }
     if "@" in identifier:
-        kwargs["email"] = identifier
-    elif identifier:
-        kwargs["username"] = identifier
+        optional["email"] = identifier
+    elif identifier and not (first_name or last_name):
+        # A single token that is not a name: treat it as a logon name to resolve.
+        optional["username"] = identifier
     if manager_email:
-        kwargs["manager"] = Manager(email=manager_email)
+        optional["manager"] = Manager(email=manager_email)
     if hire_date:
-        kwargs["hire_date"] = _parse_date(hire_date, "hire-date")
+        optional["hire_date"] = _parse_date(hire_date, "hire-date")
     if leave_date:
-        kwargs["leave_date"] = _parse_date(leave_date, "leave-date")
-    return Employee(**{k: v for k, v in kwargs.items() if v not in ("", None)})
+        optional["leave_date"] = _parse_date(leave_date, "leave-date")
+    kwargs.update({k: v for k, v in optional.items() if v not in ("", None)})
+    return Employee(**kwargs)
 
 
 def _parse_date(value: str, flag: str) -> date:
@@ -330,7 +354,7 @@ def drift(
 
     async def _do(orch: Orchestrator) -> Any:
         if identifier:
-            snapshot, findings = await orch.reconciler.detect_drift_for(identifier)
+            _snapshot, findings = await orch.reconciler.detect_drift_for(identifier)
             return findings
         report = await orch.audit_estate(limit=limit)
         return report.findings
@@ -732,8 +756,11 @@ def runs_resume(
 @runs_app.command("cancel")
 def runs_cancel(run_id: str = typer.Argument(...), reason: str = typer.Option("", help="Why.")) -> None:
     """Cancel a run."""
-    orch = _orch()
-    _print_run(orch.cancel_run(run_id, reason))
+
+    async def _do(orch: Orchestrator):
+        return await orch.cancel_run(run_id, reason)
+
+    _print_run(_run(_do))
 
 
 @runs_app.command("rollback")
@@ -806,9 +833,9 @@ def mcp(
     transport: str = typer.Option("stdio", help="stdio | streamable-http | sse"),
 ) -> None:
     """Start the MCP server so Claude Code / Claude Desktop can drive it."""
-    from iam_agent.mcp_server.server import main as mcp_main
-
     import os
+
+    from iam_agent.mcp_server.server import main as mcp_main
 
     os.environ.setdefault("IAM_MCP_TRANSPORT", transport)
     mcp_main()

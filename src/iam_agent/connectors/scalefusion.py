@@ -277,7 +277,7 @@ class LiveScalefusionConnector(ScalefusionConnector):
                 f"{len(profiles)} device profile(s) visible @ {self.base}",
                 (time.monotonic() - started) * 1000,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return HealthStatus(
                 self.name, False, "live", f"{type(exc).__name__}: {exc}", (time.monotonic() - started) * 1000
             )

@@ -95,7 +95,10 @@ class ConnectorHub:
             *(c.health() for c in self.all().values()), return_exceptions=True
         )
         out: dict[str, HealthStatus] = {}
-        for name, result in zip(self.all().keys(), results):
+        # strict=True: asyncio.gather preserves order and length, and if that ever
+        # stops being true a health report with silently mismatched platform names
+        # is exactly the kind of wrong answer nobody would question.
+        for name, result in zip(self.all().keys(), results, strict=True):
             if isinstance(result, BaseException):
                 out[name] = HealthStatus(name, False, "unknown", f"{type(result).__name__}: {result}")
             else:
@@ -115,7 +118,7 @@ class ConnectorHub:
     async def aclose(self) -> None:
         await asyncio.gather(*(c.aclose() for c in self.all().values()), return_exceptions=True)
 
-    async def __aenter__(self) -> "ConnectorHub":
+    async def __aenter__(self) -> ConnectorHub:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -140,13 +143,13 @@ def reset_hub() -> None:
 
 
 __all__ = [
-    "ConnectorHub",
-    "get_hub",
-    "reset_hub",
     "PLATFORMS",
-    "Action1Connector",
     "ADConnector",
+    "Action1Connector",
+    "ConnectorHub",
     "EntraConnector",
     "M365Connector",
     "ScalefusionConnector",
+    "get_hub",
+    "reset_hub",
 ]

@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,7 +22,7 @@ from iam_agent.core.redact import redact, safe_params
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def new_id(prefix: str) -> str:
@@ -109,7 +110,7 @@ class Action(BaseModel):
     attempts: int = 0
 
     # Rollback support: an optional inverse action, planned up-front.
-    compensating_action: "Action | None" = None
+    compensating_action: Action | None = None
 
     # Not serialised - the callable the executor runs.
     executor: Callable[..., Any] | None = Field(default=None, exclude=True)
@@ -424,6 +425,13 @@ class RunRecord(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+#: `RunStore.list()` shadows the builtin inside the class body, so an inline
+#: `list[RunRecord]` annotation there names the method rather than the type.
+#: Aliasing at module scope keeps the annotations meaningful without renaming a
+#: method the orchestrator, API and CLI all call.
+RunRecords = list[RunRecord]
+
+
 class RunStore:
     """Tiny JSON-lines + per-run-file store. No external database required.
 
@@ -432,7 +440,15 @@ class RunStore:
     """
 
     def __init__(self, directory: str | Path = "data/runs") -> None:
-        self.directory = Path(directory)
+        # Resolved to an absolute path at construction. Left relative, the
+        # directory is interpreted against whatever cwd happens to be current
+        # when save() runs, so the mkdir below can create it in one place and a
+        # later write can fail in another - which is what happened as soon as a
+        # test moved cwd between building the store and using it.
+        self.directory = Path(directory).expanduser().resolve()
+        self._ensure_directory()
+
+    def _ensure_directory(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def _path(self, run_id: str) -> Path:
@@ -445,6 +461,9 @@ class RunStore:
         # model_dump() alone is not enough: Action.params holds raw credentials
         # and pydantic has no reason to know that. Scrub on the way to disk.
         payload = redact(run.model_dump(mode="json", exclude_none=True))
+        # Re-checked per write: runs are long-lived and the directory may have
+        # been cleaned up, rotated or removed while one was parked on approval.
+        self._ensure_directory()
         tmp = self._path(run.id).with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         tmp.replace(self._path(run.id))
@@ -461,7 +480,7 @@ class RunStore:
         for path in sorted(self.directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 run = RunRecord.model_validate(json.loads(path.read_text(encoding="utf-8")))
-            except Exception:  # noqa: BLE001 - a corrupt record must not break listing
+            except Exception:
                 continue
             if workflow and run.workflow != workflow:
                 continue
@@ -470,7 +489,7 @@ class RunStore:
                 break
         return runs
 
-    def find_by_correlation(self, correlation_key: str, workflow: str) -> list[RunRecord]:
+    def find_by_correlation(self, correlation_key: str, workflow: str) -> RunRecords:
         return [
             r
             for r in self.list(limit=1000)

@@ -35,7 +35,7 @@ from iam_agent.core.errors import (
 class HealthStatus:
     """Result of a connector health probe."""
 
-    __slots__ = ("name", "healthy", "backend", "detail", "latency_ms", "checked_at")
+    __slots__ = ("backend", "checked_at", "detail", "healthy", "latency_ms", "name")
 
     def __init__(
         self,
@@ -122,7 +122,7 @@ class BaseConnector(abc.ABC):
             await self._client.aclose()
         self._client = None
 
-    async def __aenter__(self) -> "BaseConnector":
+    async def __aenter__(self) -> BaseConnector:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -257,7 +257,7 @@ class BaseConnector(abc.ABC):
     def _error_text(response: httpx.Response) -> str:
         try:
             body = response.json()
-        except Exception:  # noqa: BLE001
+        except Exception:
             return response.text[:500]
         if isinstance(body, dict):
             for key_path in (

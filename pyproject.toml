@@ -60,7 +60,14 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["E501", "B008"]
+# Deliberate exceptions, each a rule this codebase intentionally violates:
+#   E501  - line length is advisory; tables and long descriptions wrap badly.
+#   B008  - typer/fastapi call functions in default arguments by design.
+#   RUF001 - the CLI prints "ℹ" and "⚠" as status glyphs. They are not
+#            confusable-with-ASCII typos, they are the point.
+#   SIM102/SIM105 - collapsing these particular nested guards makes the
+#            safety-relevant branches harder to read, not easier.
+ignore = ["E501", "B008", "RUF001", "SIM102", "SIM105"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

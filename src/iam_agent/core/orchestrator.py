@@ -9,7 +9,7 @@ persisted, so no interface can bypass the safety layer.
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from iam_agent.config import Settings, get_settings
@@ -17,21 +17,20 @@ from iam_agent.connectors import ConnectorHub, get_hub
 from iam_agent.core.approval import ApprovalNotifier, ApprovalRequest, ApprovalStore
 from iam_agent.core.audit import AuditLog
 from iam_agent.core.errors import IAMAgentError, NotFoundError
+from iam_agent.core.executor import Executor, RollbackManager
 from iam_agent.core.models import DriftReport, Employee, IdentitySnapshot, LifecycleState
 from iam_agent.core.policy import DEFAULT_RULES, PolicyEngine
 from iam_agent.core.reconcile import Reconciler
 from iam_agent.core.result import (
     Action,
+    ExecutionPlan,
     PlanStep,
     RiskLevel,
-    ActionStatus,
-    ExecutionPlan,
     RunRecord,
     RunStatus,
     RunStore,
     StepStatus,
 )
-from iam_agent.core.executor import Executor, RollbackManager
 from iam_agent.workflows.base import WorkflowContext
 from iam_agent.workflows.registry import WorkflowRegistry
 
@@ -251,7 +250,7 @@ class Orchestrator:
             if needle:
                 try:
                     snapshot = await self.reconciler.snapshot(needle)
-                except Exception:  # noqa: BLE001 - a brand-new hire has no snapshot yet
+                except Exception:
                     snapshot = None
 
         if snapshot and snapshot.employee.email and not employee.email:
@@ -460,7 +459,9 @@ class Orchestrator:
         resume: bool = True,
     ) -> dict[str, Any]:
         """Approve or reject, then continue the parked run."""
-        request = self.get_approval(approval_id)
+        # Raises NotFoundError for an unknown id. The value is not needed - the
+        # call is the check, and `decide()` would only fail with a KeyError.
+        self.get_approval(approval_id)
         updated = self.approvals.decide(
             approval_id, approve=approve, decided_by=decided_by, comment=comment
         )
@@ -485,8 +486,10 @@ class Orchestrator:
             outcome["run_status"] = run.status.value
             outcome["progress"] = run.plan.progress() if run.plan else {}
         elif resume and updated.run_id and not approve:
-            run = self.runs.get(updated.run_id)
-            if run:
+            # Distinct name: `run` above is a RunRecord, this lookup is Optional.
+            rejected = self.runs.get(updated.run_id)
+            if rejected:
+                run = rejected
                 run.status = RunStatus.CANCELLED
                 run.log_event("cancelled_by_rejection", approval_id=approval_id, by=decided_by)
                 if run.plan:

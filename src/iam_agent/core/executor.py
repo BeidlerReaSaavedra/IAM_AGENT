@@ -16,9 +16,9 @@ review without losing its place or double-applying a step.
 
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from iam_agent.config import Settings
 from iam_agent.connectors import ConnectorHub
@@ -43,7 +43,7 @@ Handler = Callable[..., Awaitable[Any]]
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Executor:
@@ -106,7 +106,7 @@ class Executor:
         crashed = False
         try:
             await self._walk(run)
-        except Exception as exc:  # noqa: BLE001 - a run must always leave a record
+        except Exception as exc:
             crashed = True
             run.status = RunStatus.FAILED
             run.log_event("executor_error", error=f"{type(exc).__name__}: {exc}")
@@ -356,7 +356,7 @@ class Executor:
             action.mark(ActionStatus.FAILED, **exc.to_dict())
             action.error = exc.message
             self.audit.action_executed(action, run_id=run.id, outcome="failed", error=exc.message)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             action.mark(ActionStatus.FAILED, error=f"{type(exc).__name__}: {exc}")
             action.error = str(exc)
             self.audit.action_executed(action, run_id=run.id, outcome="failed", error=str(exc))
