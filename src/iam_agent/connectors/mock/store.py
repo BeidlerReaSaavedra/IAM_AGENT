@@ -55,6 +55,55 @@ def _reset_oid_counter() -> None:
     _oid_counter = 0
 
 
+class _PersistingDict(dict):
+    """A plain dict that writes the estate back to disk on every mutation.
+
+    The simulator is in-memory, but the CLI, the REST API and the MCP server are
+    three separate processes. Without this, a user created by ``iam-agent
+    onboard`` does not exist for the ``iam-agent approvals decide`` that follows
+    it, and every multi-step demo falls over with "no user ...". Live directories
+    share state by definition; the simulator has to earn the same property.
+    """
+
+    def __init__(self, store: "MockStore", *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Bypass object.__setattr__ concerns: dict has no __slots__ issues here.
+        object.__setattr__(self, "_store", store)
+
+    def _touch(self) -> None:
+        store = getattr(self, "_store", None)
+        if store is not None:
+            store._autosave()
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(key, value)
+        self._touch()
+
+    def __delitem__(self, key: Any) -> None:
+        super().__delitem__(key)
+        self._touch()
+
+    def update(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+        super().update(*args, **kwargs)
+        self._touch()
+
+    def pop(self, *args: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+        result = super().pop(*args, **kwargs)
+        self._touch()
+        return result
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:  # type: ignore[override]
+        existed = key in self
+        result = super().setdefault(key, default)
+        if not existed:
+            self._touch()
+        return result
+
+    def clear(self) -> None:  # type: ignore[override]
+        super().clear()
+        self._touch()
+
+
 # --------------------------------------------------------------------------- #
 # Seed data
 # --------------------------------------------------------------------------- #
@@ -159,35 +208,47 @@ def _seed_people() -> list[dict[str, Any]]:
 class MockStore:
     """In-memory estate simulator with optional JSON persistence."""
 
+    #: Collections that hold estate state and therefore need write-through.
+    _PERSISTED_COLLECTIONS = (
+        "users", "groups", "directory_roles", "deleted_users",
+        "mailboxes", "license_skus", "teams",
+        "action1_endpoints", "action1_groups", "action1_automations", "action1_updates",
+        "scalefusion_devices", "scalefusion_profiles", "scalefusion_groups",
+        "lifecycle_workflows", "organizations",
+    )
+
     def __init__(self, *, seed: bool = True, persist_path: str | Path | None = None) -> None:
         self._lock = threading.RLock()
         self.persist_path = Path(persist_path) if persist_path else None
+        # Seeding mints hundreds of ids and inserts hundreds of rows; writing the
+        # estate back on each one would be quadratic. Suppressed until seeded.
+        self._suppress_autosave = True
         # Deterministic ids: every fresh store must mint the same estate.
         _reset_oid_counter()
 
         # ---- Entra / AD -------------------------------------------------- #
-        self.users: dict[str, dict[str, Any]] = {}
-        self.groups: dict[str, dict[str, Any]] = {}
-        self.directory_roles: dict[str, dict[str, Any]] = {}
-        self.deleted_users: dict[str, dict[str, Any]] = {}
+        self.users: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.groups: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.directory_roles: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.deleted_users: dict[str, dict[str, Any]] = _PersistingDict(self)
 
         # ---- M365 -------------------------------------------------------- #
-        self.mailboxes: dict[str, dict[str, Any]] = {}
-        self.license_skus: dict[str, dict[str, Any]] = {}
-        self.teams: dict[str, dict[str, Any]] = {}
+        self.mailboxes: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.license_skus: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.teams: dict[str, dict[str, Any]] = _PersistingDict(self)
 
         # ---- UEM --------------------------------------------------------- #
-        self.action1_endpoints: dict[str, dict[str, Any]] = {}
-        self.action1_groups: dict[str, dict[str, Any]] = {}
-        self.action1_automations: dict[str, dict[str, Any]] = {}
-        self.action1_updates: dict[str, dict[str, Any]] = {}
+        self.action1_endpoints: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.action1_groups: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.action1_automations: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.action1_updates: dict[str, dict[str, Any]] = _PersistingDict(self)
 
-        self.scalefusion_devices: dict[str, dict[str, Any]] = {}
-        self.scalefusion_profiles: dict[str, dict[str, Any]] = {}
-        self.scalefusion_groups: dict[str, dict[str, Any]] = {}
+        self.scalefusion_devices: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.scalefusion_profiles: dict[str, dict[str, Any]] = _PersistingDict(self)
+        self.scalefusion_groups: dict[str, dict[str, Any]] = _PersistingDict(self)
 
         # ---- Lifecycle Workflows ----------------------------------------- #
-        self.lifecycle_workflows: dict[str, dict[str, Any]] = {}
+        self.lifecycle_workflows: dict[str, dict[str, Any]] = _PersistingDict(self)
         self.workflow_runs: list[dict[str, Any]] = []
 
         # ---- Misc -------------------------------------------------------- #
@@ -635,21 +696,53 @@ class MockStore:
                 "scalefusion_groups": self.scalefusion_groups,
                 "lifecycle_workflows": self.lifecycle_workflows,
                 "organizations": self.organizations,
+                # These four were missing, which silently lost state across
+                # processes: `deleted_users` is where offboarding parks accounts
+                # and where deferred_deletion looks for them, so dropping it made
+                # a leaver vanish between the CLI invocation that offboarded them
+                # and the one that was supposed to purge them.
+                "action1_updates": self.action1_updates,
+                "deleted_users": self.deleted_users,
+                "workflow_runs": self.workflow_runs,
+                "events": self.events,
             }
+
+    def _autosave(self) -> None:
+        """Write-through hook used by :class:`_PersistingDict`."""
+        if self._suppress_autosave or not self.persist_path:
+            return
+        self.save()
 
     def save(self) -> None:
         if not self.persist_path:
             return
         self.persist_path.parent.mkdir(parents=True, exist_ok=True)
-        self.persist_path.write_text(json.dumps(self.snapshot(), indent=2, default=str), encoding="utf-8")
+        # Atomic: a crash mid-write must not leave a truncated estate that the
+        # next process silently loads as "everything is gone".
+        tmp = self.persist_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.snapshot(), indent=2, default=str), encoding="utf-8")
+        tmp.replace(self.persist_path)
 
     def load(self) -> bool:
+        """Restore a previously persisted estate. Returns False if there is none."""
         if not self.persist_path or not self.persist_path.exists():
             return False
-        data = json.loads(self.persist_path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(self.persist_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return False
         with self._lock:
             for key, value in data.items():
-                if hasattr(self, key):
+                current = getattr(self, key, None)
+                if isinstance(current, dict) and isinstance(value, dict):
+                    # Update in place: setattr would discard the _PersistingDict
+                    # wrapper and silently disable write-through from then on.
+                    current.clear()
+                    current.update(value)
+                elif isinstance(current, list) and isinstance(value, list):
+                    current.clear()
+                    current.extend(value)
+                elif hasattr(self, key):
                     setattr(self, key, value)
         return True
 
@@ -671,9 +764,42 @@ _DEFAULT_STORE: MockStore | None = None
 _STORE_LOCK = threading.Lock()
 
 
-def get_mock_store(*, reseed: bool = False) -> MockStore:
+def get_mock_store(*, reseed: bool = False, persist_path: str | Path | None = None) -> MockStore:
+    """Process-wide simulator estate.
+
+    Resolution order:
+
+    1. ``reseed=True`` always builds a pristine estate (tests rely on this).
+    2. Otherwise, if a persisted estate exists on disk it is *loaded*, so a
+       second process sees the users the first one created.
+    3. Otherwise a fresh estate is seeded and persisted for the next process.
+    """
     global _DEFAULT_STORE
     with _STORE_LOCK:
-        if _DEFAULT_STORE is None or reseed:
-            _DEFAULT_STORE = MockStore(seed=True)
+        if _DEFAULT_STORE is not None and not reseed:
+            return _DEFAULT_STORE
+
+        if persist_path is None and not reseed:
+            persist_path = _configured_persist_path()
+
+        store = MockStore(seed=False, persist_path=persist_path)
+        restored = False if reseed else store.load()
+        if reseed or not restored:
+            store._seed()
+        store._suppress_autosave = False
+        store.save()
+        _DEFAULT_STORE = store
         return _DEFAULT_STORE
+
+
+def _configured_persist_path() -> str | None:
+    """Where the simulator keeps its estate, if persistence is enabled at all."""
+    try:
+        from iam_agent.config import get_settings
+
+        mock_settings = get_settings().mock
+    except Exception:  # noqa: BLE001 - settings may be mid-construction
+        return None
+    if not mock_settings.persist:
+        return None
+    return mock_settings.persist_path

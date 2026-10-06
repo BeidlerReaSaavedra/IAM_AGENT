@@ -297,6 +297,24 @@ class AuditSettings(BaseSettings):
     )
 
 
+class MockSettings(BaseSettings):
+    """The simulator backend used when a platform has no live credentials."""
+
+    model_config = SettingsConfigDict(env_prefix="IAM_MOCK_", extra="ignore")
+
+    persist: bool = True
+    """Write the simulated estate to disk so separate processes share it.
+
+    Essential for the CLI, where ``iam-agent onboard --execute`` and the later
+    ``iam-agent approvals decide`` are different processes: without this the
+    second one has never heard of the user the first one created. Turn it off for
+    throwaway single-process runs or in tests that want a pristine estate.
+    """
+
+    persist_path: str = "data/mock_estate.json"
+    """Where the simulated estate lives. Treat as disposable, never as a record."""
+
+
 class APISettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="IAM_API_", extra="ignore")
 
@@ -344,6 +362,7 @@ class Settings(BaseSettings):
     approval: ApprovalSettings = Field(default_factory=ApprovalSettings)
     audit: AuditSettings = Field(default_factory=AuditSettings)
     api: APISettings = Field(default_factory=APISettings)
+    mock: MockSettings = Field(default_factory=MockSettings)
 
     # ---- helpers --------------------------------------------------------- #
 
@@ -355,6 +374,19 @@ class Settings(BaseSettings):
             "action1": self.action1.backend if self.action1.enabled else "mock",
             "scalefusion": self.scalefusion.backend if self.scalefusion.enabled else "mock",
         }
+
+    def platform_backends_live(self) -> list[str]:
+        """Platforms that will be talked to for real.
+
+        Surfaced to the agent and to operators because the difference between
+        "this ran against your tenant" and "this ran against a simulator" is the
+        single most important fact about any result this system produces.
+        """
+        return sorted(p for p, b in self.platform_backends().items() if b == "live")
+
+    def platform_backends_mock(self) -> list[str]:
+        """Platforms currently answered by the simulator."""
+        return sorted(p for p, b in self.platform_backends().items() if b != "live")
 
     def effective_mode(self) -> ExecutionMode:
         """The global dry-run flag always wins over a permissive mode."""
